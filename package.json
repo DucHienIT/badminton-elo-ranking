@@ -1,0 +1,14 @@
+{
+  "name": "bxh_badminton",
+  "version": "1.0.0",
+  "description": "Bảng xếp hạng ELO cho CLB Cầu lông",
+  "main": "server/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server/index.js",
+    "test": "node server/elo.test.js"
+  },
+  "dependencies": {
+    "express": "^5.2.1"
+  }
+}
