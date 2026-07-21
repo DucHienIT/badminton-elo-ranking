@@ -49,7 +49,6 @@ function computeMatchElo(elos, winner, ks, minElo) {
   ];
 
   // Áp dụng ELO sàn: nếu trừ điểm làm ELO < minElo thì chặn tại minElo.
-  // (Lưu delta THỰC TẾ sau khi chặn để elo_before + delta = elo_after luôn đúng.)
   const after = [];
   const deltas = [];
   elos.forEach((elo, i) => {
@@ -71,67 +70,60 @@ function computeMatchElo(elos, winner, ks, minElo) {
  * REPLAY TOÀN BỘ LỊCH SỬ (mục 3.4):
  * ELO là tích lũy tuần tự nên khi thêm/sửa/xoá bất kỳ trận nào, cách an toàn
  * nhất là tính lại từ đầu cho toàn bộ hệ thống theo đúng thứ tự thời gian.
- * Với quy mô 1 CLB (vài nghìn trận), replay chạy trong vài ms — đủ nhanh.
  *
- * Quy trình:
- *   1. Reset ELO mọi VĐV về initial_elo, xoá sạch elo_history
- *   2. Duyệt các trận theo thứ tự (date ASC, id ASC) — trận nhập lùi ngày
- *      (backdate) vẫn được xếp đúng chỗ trong dòng thời gian
- *   3. Với mỗi trận: tính Δ theo computeMatchElo, ghi snapshot vào elo_history
- *   4. Ghi ELO cuối cùng vào players.elo
- * Tất cả trong 1 transaction — lỗi ở đâu thì rollback toàn bộ.
+ * Thiết kế cho DB REMOTE (Turso): mỗi statement là 1 round-trip mạng, nên
+ * thay vì ghi từng dòng như bản SQLite local, ta:
+ *   1. ĐỌC 2 query: danh sách VĐV + toàn bộ trận (ORDER BY date, id)
+ *   2. TÍNH toàn bộ chuỗi ELO trong bộ nhớ (computeMatchElo cho từng trận,
+ *      chọn K theo số trận đã đấu của từng người tại thời điểm đó)
+ *   3. GHI 1 batch duy nhất: DELETE elo_history + INSERT snapshot từng
+ *      người-từng trận + UPDATE elo cuối cùng của mỗi VĐV.
+ *      db.batch(..., 'write') chạy trong 1 transaction → lỗi là rollback hết.
  */
-function replayAllElo() {
-  const settings = getSettings();
-  const { initial_elo, k_base, k_new, new_threshold, min_elo } = settings;
+async function replayAllElo() {
+  const { initial_elo, k_base, k_new, new_threshold, min_elo } = await getSettings();
 
-  db.exec('BEGIN');
-  try {
-    db.exec('DELETE FROM elo_history');
+  const playersRes = await db.execute('SELECT id FROM players');
+  const matchesRes = await db.execute(
+    'SELECT * FROM matches ORDER BY date ASC, id ASC'
+  );
 
-    // State trong bộ nhớ: elo hiện tại + số trận đã đấu của từng VĐV
-    const elo = new Map();      // player_id -> elo (float, KHÔNG làm tròn khi lưu)
-    const played = new Map();   // player_id -> số trận đã đấu (để chọn K)
-    for (const p of db.prepare('SELECT id FROM players').all()) {
-      elo.set(p.id, initial_elo);
-      played.set(p.id, 0);
-    }
-
-    const matches = db
-      .prepare('SELECT * FROM matches ORDER BY date ASC, id ASC')
-      .all();
-
-    const insertHistory = db.prepare(
-      `INSERT INTO elo_history (match_id, player_id, elo_before, elo_after, delta, date)
-       VALUES (?, ?, ?, ?, ?, ?)`
-    );
-
-    for (const m of matches) {
-      const ids = [m.a1, m.a2, m.b1, m.b2];
-      const before = ids.map((id) => elo.get(id));
-      // K của từng người: VĐV còn "mới" (đấu < new_threshold trận) dùng k_new
-      const ks = ids.map((id) =>
-        played.get(id) < new_threshold ? k_new : k_base
-      );
-
-      const { deltas, after } = computeMatchElo(before, m.winner, ks, min_elo);
-
-      ids.forEach((id, i) => {
-        insertHistory.run(m.id, id, before[i], after[i], deltas[i], m.date);
-        elo.set(id, after[i]);
-        played.set(id, played.get(id) + 1);
-      });
-    }
-
-    // Đồng bộ ELO cuối cùng về bảng players
-    const updatePlayer = db.prepare('UPDATE players SET elo = ? WHERE id = ?');
-    for (const [id, value] of elo) updatePlayer.run(value, id);
-
-    db.exec('COMMIT');
-  } catch (err) {
-    db.exec('ROLLBACK');
-    throw err;
+  // State trong bộ nhớ: elo hiện tại + số trận đã đấu của từng VĐV
+  const elo = new Map();    // player_id -> elo (float, KHÔNG làm tròn khi lưu)
+  const played = new Map(); // player_id -> số trận đã đấu (để chọn K)
+  for (const p of playersRes.rows) {
+    elo.set(p.id, initial_elo);
+    played.set(p.id, 0);
   }
+
+  // Gom toàn bộ lệnh ghi vào 1 batch (1 transaction, 1 round-trip)
+  const stmts = [{ sql: 'DELETE FROM elo_history', args: [] }];
+
+  for (const m of matchesRes.rows) {
+    const ids = [m.a1, m.a2, m.b1, m.b2];
+    const before = ids.map((id) => elo.get(id));
+    // K của từng người: VĐV còn "mới" (đấu < new_threshold trận) dùng k_new
+    const ks = ids.map((id) => (played.get(id) < new_threshold ? k_new : k_base));
+
+    const { deltas, after } = computeMatchElo(before, m.winner, ks, min_elo);
+
+    ids.forEach((id, i) => {
+      stmts.push({
+        sql: `INSERT INTO elo_history (match_id, player_id, elo_before, elo_after, delta, date)
+              VALUES (?, ?, ?, ?, ?, ?)`,
+        args: [m.id, id, before[i], after[i], deltas[i], m.date],
+      });
+      elo.set(id, after[i]);
+      played.set(id, played.get(id) + 1);
+    });
+  }
+
+  // Đồng bộ ELO cuối cùng về bảng players
+  for (const [id, value] of elo) {
+    stmts.push({ sql: 'UPDATE players SET elo = ? WHERE id = ?', args: [value, id] });
+  }
+
+  await db.batch(stmts, 'write');
 }
 
 module.exports = { computeMatchElo, replayAllElo };

@@ -1,19 +1,21 @@
 // Đọc/ghi cấu hình ELO (K, ELO khởi điểm, ELO sàn, ngưỡng VĐV mới)
 const express = require('express');
-const { getSettings, updateSettings } = require('../db');
+const { getSettings, updateSettings, withWriteLock } = require('../db');
 const { replayAllElo } = require('../elo');
 
 const router = express.Router();
 
-router.get('/', (req, res) => {
-  res.json(getSettings());
+router.get('/', async (req, res) => {
+  res.json(await getSettings());
 });
 
 // Đổi config ảnh hưởng đến cách tính ELO → replay lại toàn bộ lịch sử
-router.put('/', (req, res) => {
-  updateSettings(req.body || {});
-  replayAllElo();
-  res.json(getSettings());
-});
+router.put('/', (req, res, next) =>
+  withWriteLock(async () => {
+    await updateSettings(req.body || {});
+    await replayAllElo();
+    res.json(await getSettings());
+  }).catch(next)
+);
 
 module.exports = router;

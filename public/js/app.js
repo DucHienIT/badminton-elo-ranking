@@ -4,14 +4,32 @@
 const $app = document.getElementById('app');
 
 /* ================= API helper ================= */
+// Nếu server bật ADMIN_PASSWORD, thao tác ghi trả 401 → hỏi mật khẩu 1 lần,
+// lưu localStorage và tự thử lại. Không bật thì luồng này không bao giờ chạy.
 async function api(method, path, body) {
-  const res = await fetch('/api' + path, {
-    method,
-    headers: { 'Content-Type': 'application/json' },
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  const doFetch = () => {
+    const headers = { 'Content-Type': 'application/json' };
+    const pw = localStorage.getItem('admin_pw');
+    if (pw) headers['X-Admin-Password'] = pw;
+    return fetch('/api' + path, {
+      method,
+      headers,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  };
+  let res = await doFetch();
+  if (res.status === 401) {
+    const pw = prompt('Thao tác này cần mật khẩu admin:');
+    if (pw) {
+      localStorage.setItem('admin_pw', pw);
+      res = await doFetch();
+    }
+  }
   const data = await res.json().catch(() => null);
-  if (!res.ok) throw new Error(data?.error || `Lỗi ${res.status}`);
+  if (!res.ok) {
+    if (res.status === 401) localStorage.removeItem('admin_pw'); // mật khẩu sai → nhập lại lần sau
+    throw new Error(data?.error || `Lỗi ${res.status}`);
+  }
   return data;
 }
 
