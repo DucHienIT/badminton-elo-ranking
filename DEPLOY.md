@@ -57,7 +57,7 @@ git push -u origin master
    | `ADMIN_PASSWORD` | mật khẩu tuỳ chọn — **nên đặt** khi web công khai |
 5. **Create Web Service** → chờ build xong → web sống tại `https://bxh-badminton.onrender.com`
 
-Gửi link cho cả CLB. Ai cũng **xem** được; thao tác **ghi** (thêm trận, sửa, xoá) sẽ được hỏi mật khẩu admin 1 lần trên mỗi thiết bị (lưu lại, không hỏi lại).
+Gửi link cho cả CLB. Chưa đăng nhập (Guest) thì **xem** được bảng xếp hạng, VĐV, lịch sử đấu; muốn **ghi trận / quản lý VĐV / cài đặt** thì bấm 🔑 Đăng nhập với tên đăng nhập `admin` (đổi được qua env `ADMIN_USERNAME`) và mật khẩu = `ADMIN_PASSWORD` (mỗi thiết bị đăng nhập 1 lần, được nhớ cho tới khi đăng xuất hoặc đổi mật khẩu).
 
 ## Lưu ý free tier
 

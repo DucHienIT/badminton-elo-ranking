@@ -13,10 +13,11 @@
     <a href="#/" class="brand">🏸 <span>BXH Cầu lông</span></a>
     <nav class="topnav">
       <a href="#/" data-nav="home">Bảng xếp hạng</a>
-      <a href="#/new" data-nav="new">Ghi trận</a>
+      <a href="#/new" data-nav="new" class="need-auth" hidden>Ghi trận</a>
       <a href="#/players" data-nav="players">VĐV</a>
       <a href="#/matches" data-nav="matches">Lịch sử</a>
-      <a href="#/settings" data-nav="settings">Cài đặt</a>
+      <a href="#/settings" data-nav="settings" class="need-auth" hidden>Cài đặt</a>
+      <a href="#/login" data-nav="login" class="guest-only" hidden>🔑 Đăng nhập</a>
     </nav>
   </header>
 
@@ -26,9 +27,10 @@
   <nav class="bottomnav">
     <a href="#/" data-nav="home"><span class="ico">🏆</span>BXH</a>
     <a href="#/matches" data-nav="matches"><span class="ico">📋</span>Lịch sử</a>
-    <a href="#/new" data-nav="new" class="fab-link"><span class="fab">＋</span>Ghi trận</a>
+    <a href="#/new" data-nav="new" class="fab-link need-auth" hidden><span class="fab">＋</span>Ghi trận</a>
     <a href="#/players" data-nav="players"><span class="ico">👥</span>VĐV</a>
-    <a href="#/settings" data-nav="settings"><span class="ico">⚙️</span>Cài đặt</a>
+    <a href="#/settings" data-nav="settings" class="need-auth" hidden><span class="ico">⚙️</span>Cài đặt</a>
+    <a href="#/login" data-nav="login" class="guest-only" hidden><span class="ico">🔑</span>Đăng nhập</a>
   </nav>
 
   <div id="toast" class="toast" hidden></div>

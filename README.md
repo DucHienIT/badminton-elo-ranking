@@ -16,7 +16,7 @@ Database dùng `@libsql/client`, 2 chế độ qua biến môi trường:
 - **Không cấu hình gì** → file SQLite local `data/club.db` (mặc định cho dev)
 - **`TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN`** → Turso cloud (cho production)
 
-Biến tuỳ chọn `ADMIN_PASSWORD`: nếu đặt, mọi thao tác ghi (thêm/sửa/xoá) qua web sẽ yêu cầu mật khẩu (hỏi 1 lần mỗi thiết bị); xem/đọc vẫn tự do. Không đặt = không có bảo vệ (phù hợp chạy local).
+Biến tuỳ chọn `ADMIN_PASSWORD`: nếu đặt, web có chế độ đăng nhập — Guest (chưa đăng nhập) chỉ xem được BXH, VĐV, lịch sử đấu; đăng nhập bằng tài khoản `admin` / mật khẩu này để ghi trận/quản lý VĐV/cài đặt (tên đăng nhập đổi được qua `ADMIN_USERNAME`). Không đặt = chế độ mở, không cần đăng nhập (phù hợp chạy local).
 
 **Deploy miễn phí lên internet: xem [DEPLOY.md](DEPLOY.md)** (Turso + Render, kèm script chuyển dữ liệu local lên cloud `scripts/migrate-to-turso.js`).
 

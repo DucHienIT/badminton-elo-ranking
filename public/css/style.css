@@ -15,6 +15,7 @@
   --shadow: 0 1px 3px rgba(0, 0, 0, .08);
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; } /* thắng mọi display của class (vd .btn) */
 html { -webkit-text-size-adjust: 100%; }
 body {
   margin: 0;
@@ -146,7 +147,7 @@ h2 { font-size: 1.05rem; margin: 20px 0 8px; }
 label.field { display: block; margin-bottom: 12px; font-size: .9rem; font-weight: 600; }
 label.field span.req { color: var(--lose); }
 input[type="text"], input[type="url"], input[type="number"],
-input[type="datetime-local"], select, textarea {
+input[type="password"], input[type="datetime-local"], select, textarea {
   width: 100%;
   margin-top: 4px;
   padding: 10px 12px;
@@ -276,6 +277,15 @@ select:focus, input:focus, textarea:focus {
 .stat span { font-size: .72rem; color: var(--muted); }
 .chart-wrap { overflow-x: auto; }
 .chart-wrap svg { display: block; }
+
+/* Chọn ảnh đại diện */
+.avatar-pick {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0 4px;
+}
+.avatar-pick label.btn { margin: 0; }
 
 /* ============ Player manage list ============ */
 .p-row {

@@ -3,31 +3,61 @@
 
 const $app = document.getElementById('app');
 
-/* ================= API helper ================= */
-// Nếu server bật ADMIN_PASSWORD, thao tác ghi trả 401 → hỏi mật khẩu 1 lần,
-// lưu localStorage và tự thử lại. Không bật thì luồng này không bao giờ chạy.
-async function api(method, path, body) {
-  const doFetch = () => {
-    const headers = { 'Content-Type': 'application/json' };
-    const pw = localStorage.getItem('admin_pw');
-    if (pw) headers['X-Admin-Password'] = pw;
-    return fetch('/api' + path, {
-      method,
-      headers,
-      body: body ? JSON.stringify(body) : undefined,
-    });
-  };
-  let res = await doFetch();
-  if (res.status === 401) {
-    const pw = prompt('Thao tác này cần mật khẩu admin:');
-    if (pw) {
-      localStorage.setItem('admin_pw', pw);
-      res = await doFetch();
-    }
+/* ================= Đăng nhập ================= */
+// AUTH.required = server có bật mật khẩu không; AUTH.logged_in = token hợp lệ.
+// Guest (required && !logged_in) chỉ được XEM: BXH, VĐV, lịch sử đấu.
+const AUTH = { required: false, logged_in: true };
+const canEdit = () => !AUTH.required || AUTH.logged_in;
+
+function authHeaders() {
+  const h = { 'Content-Type': 'application/json' };
+  const t = localStorage.getItem('auth_token');
+  if (t) h['X-Auth-Token'] = t;
+  return h;
+}
+
+/** Hỏi server trạng thái đăng nhập (token trong localStorage còn hợp lệ không). */
+async function loadAuth() {
+  try {
+    const res = await fetch('/api/auth', { headers: authHeaders() });
+    Object.assign(AUTH, await res.json());
+  } catch {
+    // Không hỏi được server → cứ để mặc định, các API sau sẽ tự báo lỗi
   }
+  updateNavAuth();
+}
+
+/** Ẩn/hiện các mục nav theo quyền: .need-auth chỉ khi được ghi, .guest-only khi là Guest. */
+function updateNavAuth() {
+  document.querySelectorAll('.need-auth').forEach((el) => { el.hidden = !canEdit(); });
+  document.querySelectorAll('.guest-only').forEach((el) => { el.hidden = canEdit(); });
+}
+
+function logout() {
+  localStorage.removeItem('auth_token');
+  AUTH.logged_in = false;
+  updateNavAuth();
+  toast('Đã đăng xuất');
+  location.hash = '#/';
+  if (location.hash === '#/') router(); // hash không đổi thì tự render lại
+}
+
+/* ================= API helper ================= */
+async function api(method, path, body) {
+  const res = await fetch('/api' + path, {
+    method,
+    headers: authHeaders(),
+    body: body ? JSON.stringify(body) : undefined,
+  });
   const data = await res.json().catch(() => null);
   if (!res.ok) {
-    if (res.status === 401) localStorage.removeItem('admin_pw'); // mật khẩu sai → nhập lại lần sau
+    if (res.status === 401) {
+      // Token hết hiệu lực (vd đổi mật khẩu) → về trang đăng nhập
+      localStorage.removeItem('auth_token');
+      AUTH.logged_in = false;
+      updateNavAuth();
+      location.hash = '#/login';
+    }
     throw new Error(data?.error || `Lỗi ${res.status}`);
   }
   return data;
@@ -68,7 +98,10 @@ function nowLocalInput() {
 function avatar(p, lg = false) {
   const cls = 'avatar' + (lg ? ' lg' : '');
   if (p.avatar_url) {
-    return `<img class="${cls}" src="${esc(p.avatar_url)}" alt="" onerror="this.outerHTML='${avatarInitial(p, lg).replace(/'/g, '&#39;')}'">`;
+    // Fallback khi ảnh lỗi: HTML thay thế để trong data-fb (esc() làm sạch
+    // toàn bộ nháy/ngoặc nên an toàn khi nằm trong attribute)
+    return `<img class="${cls}" src="${esc(p.avatar_url)}" alt=""
+      data-fb="${esc(avatarInitial(p, lg))}" onerror="this.outerHTML=this.dataset.fb">`;
   }
   return avatarInitial(p, lg);
 }
@@ -87,6 +120,7 @@ const routes = [
   { re: /^#\/player\/(\d+)$/, view: (m) => viewPlayerDetail(Number(m[1])), nav: 'players' },
   { re: /^#\/matches$/, view: viewMatches, nav: 'matches' },
   { re: /^#\/settings$/, view: viewSettings, nav: 'settings' },
+  { re: /^#\/login$/, view: viewLogin, nav: 'login' },
 ];
 
 async function router() {
@@ -111,7 +145,10 @@ async function router() {
   $app.innerHTML = '<div class="empty">Không tìm thấy trang</div>';
 }
 window.addEventListener('hashchange', router);
-window.addEventListener('DOMContentLoaded', router);
+window.addEventListener('DOMContentLoaded', async () => {
+  await loadAuth(); // biết quyền trước khi render trang đầu tiên
+  router();
+});
 
 /* ================= 1. Bảng xếp hạng ================= */
 async function viewLeaderboard() {
@@ -162,6 +199,7 @@ async function viewLeaderboard() {
 
 /* ================= 2. Form ghi / sửa trận đấu ================= */
 async function viewMatchForm(editId) {
+  if (!canEdit()) { location.hash = '#/login'; return; }
   const players = await api('GET', '/players');
   if (players.length < 4) {
     $app.innerHTML = `<h1>➕ Ghi nhận trận đấu</h1>
@@ -289,24 +327,69 @@ async function viewMatchForm(editId) {
 }
 
 /* ================= 3. Quản lý VĐV ================= */
+/**
+ * Đọc file ảnh người dùng chọn → crop vuông giữa ảnh → resize 256×256
+ * → nén JPEG (~10-20KB) → trả về data-URL. Ảnh lưu thẳng vào DB dưới dạng
+ * text nên không cần dịch vụ lưu file — sống sót qua mọi lần redeploy.
+ */
+function fileToAvatar(file) {
+  return new Promise((resolve, reject) => {
+    if (!file.type.startsWith('image/')) return reject(new Error('File không phải ảnh'));
+    const draw = (img, w, h) => {
+      const S = 256;
+      const canvas = document.createElement('canvas');
+      canvas.width = canvas.height = S;
+      const side = Math.min(w, h); // crop vuông chính giữa
+      canvas.getContext('2d').drawImage(img, (w - side) / 2, (h - side) / 2, side, side, 0, 0, S, S);
+      return canvas.toDataURL('image/jpeg', 0.85);
+    };
+    // createImageBitmap tự xoay ảnh theo EXIF (ảnh chụp dọc từ điện thoại)
+    if (window.createImageBitmap) {
+      createImageBitmap(file, { imageOrientation: 'from-image' })
+        .then((bmp) => resolve(draw(bmp, bmp.width, bmp.height)))
+        .catch(reject);
+    } else {
+      const img = new Image();
+      const url = URL.createObjectURL(file);
+      img.onload = () => { URL.revokeObjectURL(url); resolve(draw(img, img.width, img.height)); };
+      img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Không đọc được ảnh')); };
+      img.src = url;
+    }
+  });
+}
+
 async function viewPlayers() {
   const players = await api('GET', '/players');
+  // State của form (dùng chung cho Thêm mới và Sửa)
+  let avatarData = null; // data-URL hoặc http URL hiện tại, null = không có ảnh
+  let editingId = null;  // null = đang ở chế độ thêm mới
+
   $app.innerHTML = `
-    <h1>👥 Quản lý VĐV</h1>
+    <h1>👥 ${canEdit() ? 'Quản lý VĐV' : 'Danh sách VĐV'}</h1>
+    ${canEdit() ? `
     <div class="card">
-      <form id="addForm">
+      <h2 id="pf-title" style="margin-top:0">Thêm VĐV mới</h2>
+      <form id="pf">
         <label class="field">Tên VĐV <span class="req">*</span>
-          <input type="text" id="np-name" placeholder="Nguyễn Văn A" required>
+          <input type="text" id="pf-name" placeholder="Nguyễn Văn A" required>
         </label>
-        <label class="field">Ảnh đại diện (URL, tuỳ chọn)
-          <input type="url" id="np-avatar" placeholder="https://...">
-        </label>
+        <div class="field">Ảnh đại diện (tuỳ chọn)
+          <div class="avatar-pick">
+            <span id="pf-preview"><span class="avatar lg">?</span></span>
+            <label class="btn sm secondary" for="pf-file">📷 Chọn ảnh</label>
+            <input type="file" id="pf-file" accept="image/*" hidden>
+            <button type="button" class="btn sm danger" id="pf-clearimg" hidden>Xoá ảnh</button>
+          </div>
+        </div>
         <label class="field">Ghi chú (tuỳ chọn)
-          <input type="text" id="np-note" placeholder="VD: tay vợt chủ lực">
+          <input type="text" id="pf-note" placeholder="VD: tay vợt chủ lực">
         </label>
-        <button class="btn block" type="submit">＋ Thêm VĐV</button>
+        <div style="display:flex;gap:8px">
+          <button class="btn" type="submit" id="pf-submit" style="flex:1">＋ Thêm VĐV</button>
+          <button class="btn secondary" type="button" id="pf-cancel" hidden>Huỷ</button>
+        </div>
       </form>
-    </div>
+    </div>` : ''}
     <div class="card" id="playerList">
       ${players.length === 0 ? '<div class="empty">Chưa có VĐV nào</div>' : ''}
       ${players
@@ -318,33 +401,75 @@ async function viewPlayers() {
             <div class="nm">${esc(p.name)} <span class="muted">· ELO ${rnd(p.elo)}</span></div>
             <div class="nt">${p.matches_played} trận${p.note ? ' · ' + esc(p.note) : ''}</div>
           </a>
+          ${canEdit() ? `
           <button class="btn sm secondary" data-act="edit">Sửa</button>
-          <button class="btn sm danger" data-act="del">Xoá</button>
+          <button class="btn sm danger" data-act="del">Xoá</button>` : ''}
         </div>`
         )
         .join('')}
     </div>`;
 
-  document.getElementById('addForm').addEventListener('submit', async (e) => {
-    e.preventDefault();
+  if (!canEdit()) return; // Guest: chỉ xem danh sách, không gắn handler ghi
+
+  const $ = (id) => document.getElementById(id);
+  const renderPreview = (name) => {
+    $('pf-preview').innerHTML = avatarData
+      ? `<img class="avatar lg" src="${esc(avatarData)}" alt="">`
+      : avatarInitial({ name: name || '?' }, true);
+    $('pf-clearimg').hidden = !avatarData;
+  };
+  const resetForm = () => {
+    editingId = null;
+    avatarData = null;
+    $('pf').reset();
+    $('pf-title').textContent = 'Thêm VĐV mới';
+    $('pf-submit').textContent = '＋ Thêm VĐV';
+    $('pf-cancel').hidden = true;
+    renderPreview();
+  };
+
+  $('pf-file').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
     try {
-      await api('POST', '/players', {
-        name: document.getElementById('np-name').value,
-        avatar_url: document.getElementById('np-avatar').value,
-        note: document.getElementById('np-note').value,
-      });
-      toast('Đã thêm VĐV');
+      avatarData = await fileToAvatar(file);
+      renderPreview($('pf-name').value);
+    } catch (err) {
+      toast(err.message || 'Không đọc được ảnh', true);
+    }
+    e.target.value = ''; // cho phép chọn lại cùng 1 file
+  });
+  $('pf-clearimg').addEventListener('click', () => {
+    avatarData = null;
+    renderPreview($('pf-name').value);
+  });
+  $('pf-cancel').addEventListener('click', resetForm);
+
+  $('pf').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const body = {
+      name: $('pf-name').value,
+      note: $('pf-note').value,
+      avatar_url: avatarData || '',
+    };
+    try {
+      if (editingId) {
+        await api('PUT', '/players/' + editingId, body);
+        toast('Đã cập nhật VĐV');
+      } else {
+        await api('POST', '/players', body);
+        toast('Đã thêm VĐV');
+      }
       viewPlayers();
     } catch (err) {
       toast(err.message, true);
     }
   });
 
-  document.getElementById('playerList').addEventListener('click', async (e) => {
+  $('playerList').addEventListener('click', async (e) => {
     const btn = e.target.closest('button[data-act]');
     if (!btn) return;
-    const row = btn.closest('.p-row');
-    const id = Number(row.dataset.id);
+    const id = Number(btn.closest('.p-row').dataset.id);
     const p = players.find((x) => x.id === id);
     if (btn.dataset.act === 'del') {
       if (!confirm(`Xoá VĐV "${p.name}"?`)) return;
@@ -356,19 +481,16 @@ async function viewPlayers() {
         toast(err.message, true);
       }
     } else if (btn.dataset.act === 'edit') {
-      const name = prompt('Tên VĐV:', p.name);
-      if (name === null) return;
-      const note = prompt('Ghi chú:', p.note || '');
-      if (note === null) return;
-      const avatar_url = prompt('URL ảnh đại diện (bỏ trống nếu không có):', p.avatar_url || '');
-      if (avatar_url === null) return;
-      try {
-        await api('PUT', '/players/' + id, { name, note, avatar_url });
-        toast('Đã cập nhật');
-        viewPlayers();
-      } catch (err) {
-        toast(err.message, true);
-      }
+      // Đưa dữ liệu VĐV vào form phía trên để sửa (kể cả đổi/xoá ảnh)
+      editingId = id;
+      avatarData = p.avatar_url || null;
+      $('pf-name').value = p.name;
+      $('pf-note').value = p.note || '';
+      $('pf-title').textContent = 'Sửa VĐV: ' + p.name;
+      $('pf-submit').textContent = '💾 Lưu thay đổi';
+      $('pf-cancel').hidden = false;
+      renderPreview(p.name);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
     }
   });
 }
@@ -425,8 +547,10 @@ async function viewMatches() {
     <h1>📋 Lịch sử trận đấu <span class="muted" style="font-weight:400;font-size:.9rem">(${matches.length} trận)</span></h1>
     ${
       matches.length === 0
-        ? '<div class="empty">Chưa có trận nào.<br><br><a class="btn" href="#/new">＋ Ghi trận đầu tiên</a></div>'
-        : matches.map((m) => matchCard(m, { actions: true })).join('')
+        ? '<div class="empty">Chưa có trận nào.' +
+          (canEdit() ? '<br><br><a class="btn" href="#/new">＋ Ghi trận đầu tiên</a>' : '') +
+          '</div>'
+        : matches.map((m) => matchCard(m, { actions: canEdit() })).join('')
     }`;
 
   // Gán onclick (không dùng addEventListener) để không tích luỹ listener khi vào lại trang
@@ -574,6 +698,7 @@ async function viewPlayerDetail(id) {
 
 /* ================= 6. Cài đặt ================= */
 async function viewSettings() {
+  if (!canEdit()) { location.hash = '#/login'; return; }
   const s = await api('GET', '/settings');
   $app.innerHTML = `
     <h1>⚙️ Cài đặt hệ thống ELO</h1>
@@ -598,6 +723,18 @@ async function viewSettings() {
       <p class="muted" style="margin-bottom:0">⚠ Thay đổi cấu hình sẽ tính lại ELO của toàn bộ lịch sử trận đấu.</p>
     </form>`;
 
+  // Nút đăng xuất (chỉ có ý nghĩa khi server bật đăng nhập)
+  if (AUTH.required) {
+    $app.insertAdjacentHTML(
+      'beforeend',
+      `<div class="card" style="text-align:center">
+        <button class="btn danger" id="logoutBtn">🚪 Đăng xuất</button>
+        <p class="muted" style="margin-bottom:0">Sau khi đăng xuất bạn chỉ xem được BXH, VĐV và lịch sử đấu.</p>
+      </div>`
+    );
+    document.getElementById('logoutBtn').addEventListener('click', logout);
+  }
+
   document.getElementById('settingsForm').addEventListener('submit', async (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
@@ -605,6 +742,55 @@ async function viewSettings() {
     try {
       await api('PUT', '/settings', body);
       toast('Đã lưu cấu hình, ELO đã được tính lại toàn bộ');
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+}
+
+/* ================= 7. Đăng nhập ================= */
+async function viewLogin() {
+  if (canEdit()) {
+    // Đã đăng nhập rồi (hoặc server ở chế độ mở) → không cần trang này
+    $app.innerHTML = `<div class="empty">Bạn đang có toàn quyền chỉnh sửa.<br><br>
+      <a class="btn" href="#/">Về bảng xếp hạng</a></div>`;
+    return;
+  }
+  $app.innerHTML = `
+    <h1>🔑 Đăng nhập</h1>
+    <form class="card" id="loginForm">
+      <p class="muted" style="margin-top:0">Đăng nhập để ghi trận đấu, quản lý VĐV và cài đặt.
+        Không đăng nhập vẫn xem được bảng xếp hạng, VĐV và lịch sử đấu.</p>
+      <label class="field">Tên đăng nhập
+        <input type="text" id="login-user" autocomplete="username" required autofocus
+          autocapitalize="none" spellcheck="false">
+      </label>
+      <label class="field">Mật khẩu
+        <input type="password" id="login-pw" autocomplete="current-password" required>
+      </label>
+      <button class="btn block" type="submit">Đăng nhập</button>
+    </form>`;
+
+  document.getElementById('loginForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    // Dùng fetch thường (không qua api()) để 401 "sai mật khẩu" không bị
+    // xử lý như phiên hết hạn
+    try {
+      const res = await fetch('/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: document.getElementById('login-user').value.trim(),
+          password: document.getElementById('login-pw').value,
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(data?.error || `Lỗi ${res.status}`);
+      localStorage.setItem('auth_token', data.token);
+      AUTH.logged_in = true;
+      updateNavAuth();
+      toast('Đăng nhập thành công');
+      location.hash = '#/';
     } catch (err) {
       toast(err.message, true);
     }

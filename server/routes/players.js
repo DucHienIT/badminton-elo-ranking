@@ -15,6 +15,18 @@ const STATS_SQL = `
   FROM players p
 `;
 
+/**
+ * Avatar hợp lệ: null, URL http(s), hoặc data-URL ảnh (frontend đã resize
+ * về 256px JPEG trước khi gửi). Trả về giá trị sạch hoặc {error}.
+ */
+function validateAvatar(v) {
+  if (v === undefined || v === null || v === '') return null;
+  const s = String(v);
+  if (/^https?:\/\//.test(s) && s.length <= 2048) return s;
+  if (/^data:image\/(jpeg|png|webp|gif);base64,/.test(s) && s.length <= 700000) return s;
+  return { error: 'Ảnh đại diện không hợp lệ (hoặc quá lớn)' };
+}
+
 function withDerivedStats(row) {
   const losses = row.matches_played - row.wins;
   return {
@@ -34,10 +46,12 @@ router.get('/', async (req, res) => {
 router.post('/', async (req, res) => {
   const name = (req.body.name || '').trim();
   if (!name) return res.status(400).json({ error: 'Tên VĐV không được để trống' });
+  const avatar = validateAvatar(req.body.avatar_url);
+  if (avatar && avatar.error) return res.status(400).json({ error: avatar.error });
   const { initial_elo } = await getSettings();
   const info = await db.execute({
     sql: 'INSERT INTO players (name, avatar_url, note, elo) VALUES (?, ?, ?, ?)',
-    args: [name, req.body.avatar_url || null, req.body.note || null, initial_elo],
+    args: [name, avatar, req.body.note || null, initial_elo],
   });
   const id = Number(info.lastInsertRowid);
   const row = await db.execute({ sql: 'SELECT * FROM players WHERE id = ?', args: [id] });
@@ -52,11 +66,16 @@ router.put('/:id', async (req, res) => {
   if (!existing) return res.status(404).json({ error: 'Không tìm thấy VĐV' });
   const name = (req.body.name ?? existing.name).trim();
   if (!name) return res.status(400).json({ error: 'Tên VĐV không được để trống' });
+  let avatar = existing.avatar_url;
+  if (req.body.avatar_url !== undefined) {
+    avatar = validateAvatar(req.body.avatar_url);
+    if (avatar && avatar.error) return res.status(400).json({ error: avatar.error });
+  }
   await db.execute({
     sql: 'UPDATE players SET name = ?, avatar_url = ?, note = ? WHERE id = ?',
     args: [
       name,
-      req.body.avatar_url !== undefined ? req.body.avatar_url || null : existing.avatar_url,
+      avatar,
       req.body.note !== undefined ? req.body.note || null : existing.note,
       id,
     ],
