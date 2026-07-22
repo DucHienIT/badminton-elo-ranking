@@ -121,7 +121,27 @@ const routes = [
   { re: /^#\/matches$/, view: viewMatches, nav: 'matches' },
   { re: /^#\/settings$/, view: viewSettings, nav: 'settings' },
   { re: /^#\/login$/, view: viewLogin, nav: 'login' },
+  { re: /^#\/counter$/, view: viewCounter, nav: 'new' },
 ];
+
+/* Giữ màn hình luôn sáng khi đang dùng bộ đếm điểm (Wake Lock API).
+   Trình duyệt không hỗ trợ thì bỏ qua trong im lặng. */
+let _wakeLock = null;
+async function keepAwake(on) {
+  try {
+    if (on && 'wakeLock' in navigator && !_wakeLock) {
+      _wakeLock = await navigator.wakeLock.request('screen');
+      _wakeLock.addEventListener('release', () => { _wakeLock = null; });
+    } else if (!on && _wakeLock) {
+      await _wakeLock.release();
+      _wakeLock = null;
+    }
+  } catch { /* không hỗ trợ / bị từ chối — không sao */ }
+}
+document.addEventListener('visibilitychange', () => {
+  // Màn hình bật lại (mở khoá điện thoại) → xin giữ sáng tiếp nếu vẫn ở bộ đếm
+  if (document.visibilityState === 'visible' && location.hash === '#/counter') keepAwake(true);
+});
 
 async function router() {
   const hash = location.hash || '#/';
@@ -131,6 +151,7 @@ async function router() {
       document.querySelectorAll('[data-nav]').forEach((a) =>
         a.classList.toggle('active', a.dataset.nav === r.nav)
       );
+      keepAwake(hash === '#/counter'); // rời bộ đếm thì thả wake lock
       $app.onclick = null; // reset handler của view trước
       $app.innerHTML = '<p class="muted">Đang tải…</p>';
       try {
@@ -198,6 +219,19 @@ async function viewLeaderboard() {
 }
 
 /* ================= 2. Form ghi / sửa trận đấu ================= */
+// Scoreboard: chuỗi lưu DB "21-15, 18-21" <-> mảng ván [{a:21,b:15},...]
+function parseScore(str) {
+  if (!str) return [];
+  return str.split(',').map((part) => {
+    const m = part.trim().match(/^(\d+)\s*-\s*(\d+)$/);
+    return m ? { a: m[1], b: m[2] } : { a: '', b: '' };
+  });
+}
+function buildScore(sets) {
+  const done = sets.filter((s) => s.a !== '' && s.b !== '');
+  return done.length ? done.map((s) => `${Number(s.a)}-${Number(s.b)}`).join(', ') : '';
+}
+
 async function viewMatchForm(editId) {
   if (!canEdit()) { location.hash = '#/login'; return; }
   const players = await api('GET', '/players');
@@ -215,7 +249,38 @@ async function viewMatchForm(editId) {
     a1: match?.a1 || '', a2: match?.a2 || '',
     b1: match?.b1 || '', b2: match?.b2 || '',
     winner: match?.winner || '',
+    // Scoreboard: tối thiểu 1 ván, tối đa 3 (cầu lông đánh best-of-3)
+    sets: (() => {
+      const s = parseScore(match?.score);
+      return s.length ? s : [{ a: '', b: '' }];
+    })(),
   };
+
+  // Khôi phục NHÁP của form (đã lưu khi mở Bộ đếm) — giữ nguyên 4 VĐV,
+  // đội thắng, ngày giờ, các ván khi đi sang bộ đếm rồi quay lại
+  let draftDate = null;
+  try {
+    const draft = JSON.parse(sessionStorage.getItem('match_draft') || 'null');
+    if (draft && (draft.editId || null) === (editId || null)) {
+      state.a1 = draft.a1; state.a2 = draft.a2;
+      state.b1 = draft.b1; state.b2 = draft.b2;
+      state.winner = draft.winner || '';
+      if (draft.sets?.length) state.sets = draft.sets;
+      draftDate = draft.date || null;
+    }
+  } catch {}
+  sessionStorage.removeItem('match_draft'); // dùng 1 lần
+
+  // Điểm chuyển sang từ Bộ đếm (#/counter) → thay toàn bộ các ván
+  let fromCounter = false;
+  try {
+    const cs = JSON.parse(localStorage.getItem('counter_sets') || 'null');
+    if (cs?.sets?.length && Date.now() - cs.t < 2 * 3600 * 1000) {
+      state.sets = cs.sets.slice(0, 3).map((s) => ({ a: String(s.a), b: String(s.b) }));
+      fromCounter = true;
+    }
+  } catch {}
+  localStorage.removeItem('counter_sets'); // dùng 1 lần
 
   const slotLabels = { a1: 'VĐV 1', a2: 'VĐV 2', b1: 'VĐV 1', b2: 'VĐV 2' };
   const playerOptions = (slot) => {
@@ -235,8 +300,8 @@ async function viewMatchForm(editId) {
     );
   };
 
-  // datetime-local cần "YYYY-MM-DDTHH:mm"
-  const dateVal = match?.date ? match.date.slice(0, 16) : nowLocalInput();
+  // datetime-local cần "YYYY-MM-DDTHH:mm"; nháp (nếu có) được ưu tiên
+  const dateVal = draftDate || (match?.date ? match.date.slice(0, 16) : nowLocalInput());
 
   $app.innerHTML = `
     <h1>${editId ? '✏️ Sửa trận đấu' : '➕ Ghi nhận trận đấu'}</h1>
@@ -259,10 +324,13 @@ async function viewMatchForm(editId) {
         <button type="button" id="winB">Đội B thắng</button>
       </div>
 
-      <label class="field">Tỷ số từng ván (tuỳ chọn)
-        <input type="text" id="score" placeholder="21-15, 18-21, 21-19"
-          value="${esc(match?.score || '')}" inputmode="numeric">
-      </label>
+      <p style="margin:0 0 6px;font-weight:600;font-size:.9rem;display:flex;justify-content:space-between;align-items:center">
+        Tỷ số từng ván (tuỳ chọn)
+        <a class="btn sm secondary" href="#/counter" id="openCounter"
+          title="Bộ đếm điểm fullscreen dùng tại sân">🔢 Bộ đếm điểm</a>
+      </p>
+      <div class="scoreboard" id="scoreboard"></div>
+
       <label class="field">Ngày giờ thi đấu
         <input type="datetime-local" id="date" value="${dateVal}">
       </label>
@@ -297,18 +365,120 @@ async function viewMatchForm(editId) {
   winB.addEventListener('click', () => setWinner('B'));
   if (state.winner) setWinner(state.winner);
 
+  // ---------- Scoreboard: nhập điểm từng ván ----------
+  // Đếm ván thắng của mỗi đội (chỉ tính ván đã nhập đủ 2 ô và không hoà)
+  const setsWon = () => {
+    let a = 0, b = 0;
+    for (const s of state.sets) {
+      if (s.a === '' || s.b === '') continue;
+      const na = Number(s.a), nb = Number(s.b);
+      if (na > nb) a++;
+      else if (nb > na) b++;
+    }
+    return { a, b };
+  };
+
+  // Nhập điểm xong → tự chọn đội thắng theo số ván (vẫn bấm tay đè được).
+  // userTyped=false (lúc mở form sửa): chỉ cập nhật summary, KHÔNG đè
+  // đội thắng đã lưu trong DB.
+  const onScoreChange = (userTyped = true) => {
+    const w = setsWon();
+    if (userTyped && w.a !== w.b) setWinner(w.a > w.b ? 'A' : 'B');
+    const sum = document.getElementById('setSum');
+    if (sum) {
+      sum.textContent = w.a + w.b > 0 ? `Ván: Đội A ${w.a} – ${w.b} Đội B` : '';
+    }
+  };
+
+  function renderScoreboard() {
+    const sb = document.getElementById('scoreboard');
+    sb.innerHTML =
+      state.sets
+        .map(
+          (s, i) => `
+      <div class="set-row" data-i="${i}">
+        <span class="set-label">Ván ${i + 1}</span>
+        <input type="number" min="0" max="99" inputmode="numeric" class="set-a"
+          value="${esc(s.a)}" placeholder="21" aria-label="Điểm đội A ván ${i + 1}">
+        <span class="set-dash">–</span>
+        <input type="number" min="0" max="99" inputmode="numeric" class="set-b"
+          value="${esc(s.b)}" placeholder="15" aria-label="Điểm đội B ván ${i + 1}">
+        <button type="button" class="set-del" title="Xoá ván ${i + 1}"
+          ${state.sets.length <= 1 ? 'disabled' : ''}>✕</button>
+      </div>`
+        )
+        .join('') +
+      `<div class="set-foot">
+        ${state.sets.length < 3 ? '<button type="button" class="btn sm secondary" id="addSet">＋ Thêm ván</button>' : ''}
+        <span class="muted" id="setSum"></span>
+      </div>`;
+
+    sb.querySelectorAll('.set-row').forEach((row) => {
+      const i = Number(row.dataset.i);
+      // Gõ điểm chỉ cập nhật state + summary (không re-render để không mất focus)
+      row.querySelector('.set-a').addEventListener('input', (e) => {
+        state.sets[i].a = e.target.value;
+        onScoreChange();
+      });
+      row.querySelector('.set-b').addEventListener('input', (e) => {
+        state.sets[i].b = e.target.value;
+        onScoreChange();
+      });
+      row.querySelector('.set-del').addEventListener('click', () => {
+        state.sets.splice(i, 1);
+        renderScoreboard();
+        onScoreChange();
+      });
+    });
+    const add = sb.querySelector('#addSet');
+    if (add) {
+      add.addEventListener('click', () => {
+        state.sets.push({ a: '', b: '' });
+        renderScoreboard();
+        sb.querySelector(`.set-row[data-i="${state.sets.length - 1}"] .set-a`).focus();
+      });
+    }
+    onScoreChange(false); // render lại chỉ cập nhật summary
+  }
+  renderScoreboard();
+  if (fromCounter) {
+    onScoreChange(true); // điểm từ bộ đếm → tự chọn luôn đội thắng theo ván
+    toast('Đã cập nhật tỷ số từ bộ đếm');
+  }
+
+  // Mở Bộ đếm → lưu nháp toàn bộ form trước để quay lại không mất gì
+  document.getElementById('openCounter').addEventListener('click', () => {
+    sessionStorage.setItem('match_draft', JSON.stringify({
+      editId: editId || null,
+      a1: state.a1, a2: state.a2, b1: state.b1, b2: state.b2,
+      winner: state.winner,
+      sets: state.sets,
+      date: document.getElementById('date').value,
+    }));
+  });
+
   document.getElementById('matchForm').addEventListener('submit', async (e) => {
     e.preventDefault();
+    // Ván nhập dở (mới có điểm 1 bên) → bắt nhập nốt thay vì lặng lẽ bỏ qua
+    const incomplete = state.sets.findIndex((s) => (s.a === '') !== (s.b === ''));
+    if (incomplete >= 0) return toast(`Ván ${incomplete + 1} nhập thiếu điểm một đội`, true);
+
     const payload = {
       a1: Number(state.a1), a2: Number(state.a2),
       b1: Number(state.b1), b2: Number(state.b2),
       winner: state.winner,
-      score: document.getElementById('score').value,
+      score: buildScore(state.sets),
       date: document.getElementById('date').value,
     };
     if (!payload.a1 || !payload.a2 || !payload.b1 || !payload.b2)
       return toast('Hãy chọn đủ 4 VĐV', true);
     if (!payload.winner) return toast('Hãy chọn đội thắng', true);
+
+    // Cảnh báo nếu đội thắng chọn ngược với tỷ số các ván
+    const w = setsWon();
+    if (w.a !== w.b && (w.a > w.b ? 'A' : 'B') !== payload.winner) {
+      if (!confirm('Đội thắng đang chọn NGƯỢC với tỷ số các ván. Vẫn lưu chứ?')) return;
+    }
     try {
       if (editId) {
         await api('PUT', '/matches/' + editId, payload);
@@ -748,7 +918,120 @@ async function viewSettings() {
   });
 }
 
-/* ================= 7. Đăng nhập ================= */
+/* ================= 7. Bộ đếm điểm (dùng tại sân) ================= */
+// Fullscreen, chạm nửa màn hình để +1 điểm. MỖI LẦN MỞ LÀ ĐẾM MỚI —
+// không nhớ trạng thái của lần đếm trước. Nếu mở từ form Ghi trận thì nạp
+// các ván ĐANG CÓ TRONG FORM (để đếm tiếp ván kế), điểm ván hiện tại về 0-0.
+function viewCounter() {
+  localStorage.removeItem('counter_state'); // dọn key của bản cũ (nếu còn)
+
+  // Được mở từ form Ghi trận? (form đã lưu nháp trước khi chuyển sang đây)
+  // → mọi nút thoát đều quay VỀ FORM, kèm tỷ số các ván đã chốt.
+  const draft = (() => {
+    try { return JSON.parse(sessionStorage.getItem('match_draft') || 'null'); } catch { return null; }
+  })();
+
+  const st = { a: 0, b: 0, sets: [] };
+  // Nạp các ván đã nhập đủ 2 ô trong form (nguồn chân lý là form, không phải bộ nhớ cũ)
+  if (draft?.sets) {
+    st.sets = draft.sets
+      .filter((s) => s.a !== '' && s.b !== '')
+      .slice(0, 3)
+      .map((s) => ({ a: Number(s.a), b: Number(s.b) }));
+  }
+  const backToForm = (sets) => {
+    if (sets.length) {
+      localStorage.setItem('counter_sets', JSON.stringify({ t: Date.now(), sets }));
+    }
+    location.hash = draft?.editId ? '#/edit/' + draft.editId : '#/new';
+  };
+
+  $app.innerHTML = `
+    <div class="counter">
+      <div class="c-half c-a" id="cA">
+        <div class="c-name">Đội A</div>
+        <div class="c-score" id="scoreA">${st.a}</div>
+        <button type="button" class="c-minus" id="minusA">−1</button>
+      </div>
+      <div class="c-half c-b" id="cB">
+        <div class="c-name">Đội B</div>
+        <div class="c-score" id="scoreB">${st.b}</div>
+        <button type="button" class="c-minus" id="minusB">−1</button>
+      </div>
+      <div class="c-sets" id="cSets" hidden></div>
+      <div class="c-bar">
+        <button type="button" class="c-btn c-btn-main" id="cEndSet">🏁 Xong ván</button>
+        <button type="button" class="c-btn" id="cSwap" title="Đổi bên">⇄</button>
+        <button type="button" class="c-btn" id="cReset" title="Làm mới">⟲</button>
+        <button type="button" class="c-btn" id="cExit" title="Thoát">✕</button>
+      </div>
+    </div>`;
+
+  const $ = (id) => document.getElementById(id);
+
+  const render = () => {
+    $('scoreA').textContent = st.a;
+    $('scoreB').textContent = st.b;
+    // Chip các ván đã xong: "21-15 · 18-21"
+    $('cSets').hidden = st.sets.length === 0;
+    $('cSets').textContent = st.sets.map((s) => `${s.a}-${s.b}`).join(' · ');
+    // Tới điểm kết thúc ván (≥21 cách 2, hoặc chạm 30) → nhấp nháy nút Xong ván
+    const setPoint =
+      ((st.a >= 21 || st.b >= 21) && Math.abs(st.a - st.b) >= 2) || st.a === 30 || st.b === 30;
+    $('cEndSet').classList.toggle('pulse', setPoint && st.a !== st.b);
+  };
+
+  const bump = (side, delta) => {
+    st[side] = Math.max(0, Math.min(99, st[side] + delta));
+    render();
+  };
+  // Chạm cả nửa màn hình = +1 (trừ khi bấm đúng nút −1)
+  $('cA').addEventListener('click', (e) => { if (e.target.id !== 'minusA') bump('a', 1); });
+  $('cB').addEventListener('click', (e) => { if (e.target.id !== 'minusB') bump('b', 1); });
+  $('minusA').addEventListener('click', () => bump('a', -1));
+  $('minusB').addEventListener('click', () => bump('b', -1));
+
+  // 🏁 Xong ván: chốt ván hiện tại. Nếu đến từ form → quay về form luôn
+  // (mở lại bộ đếm sẽ đếm tiếp ván sau, các ván cũ vẫn còn).
+  $('cEndSet').addEventListener('click', () => {
+    if (st.a + st.b === 0) return toast('Ván chưa có điểm nào', true);
+    if (st.a === st.b) return toast('Đang hoà — ván phải có đội thắng', true);
+    if (st.sets.length >= 3) return toast('Đã đủ 3 ván', true);
+    st.sets.push({ a: st.a, b: st.b });
+    st.a = 0;
+    st.b = 0;
+    render();
+    if (draft) return backToForm([...st.sets]);
+    toast(`Xong ván ${st.sets.length}: ${st.sets[st.sets.length - 1].a}-${st.sets[st.sets.length - 1].b}`);
+  });
+
+  // ✕ Thoát: về form (nếu đến từ form) kèm các ván ĐÃ chốt; điểm ván đang
+  // đếm dở bị bỏ (mở lại bộ đếm là đếm mới). Mở trực tiếp thì về trang chủ.
+  $('cExit').addEventListener('click', () => {
+    if (draft) return backToForm([...st.sets]);
+    location.hash = '#/';
+  });
+
+  // ⇄ Đổi bên: chỉ đảo VỊ TRÍ hiển thị hai đội trên màn hình (như đổi sân
+  // giữa ván) — điểm, tên đội, dữ liệu ghi nhận không đổi
+  let flipped = false;
+  $('cSwap').addEventListener('click', () => {
+    flipped = !flipped;
+    $('cA').style.order = flipped ? 2 : 1;
+    $('cB').style.order = flipped ? 1 : 2;
+  });
+
+  // ⟲ Làm mới: xoá điểm + các ván đã đếm ngay, không hỏi lại
+  $('cReset').addEventListener('click', () => {
+    st.a = 0; st.b = 0; st.sets = [];
+    render();
+  });
+
+  render();
+  keepAwake(true);
+}
+
+/* ================= 8. Đăng nhập ================= */
 async function viewLogin() {
   if (canEdit()) {
     // Đã đăng nhập rồi (hoặc server ở chế độ mở) → không cần trang này
