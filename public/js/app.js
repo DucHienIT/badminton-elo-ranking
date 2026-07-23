@@ -727,24 +727,27 @@ function arenaCountdown(iso) {
   return hours > 0 ? `CÒN ${hours} GIỜ ${minutes % 60} PHÚT` : `CÒN ${minutes} PHÚT`;
 }
 
-function arenaCard(m, featured = false) {
+function arenaCard(m) {
   const side = (letter) => {
-    const names = letter === 'A' ? [m.a1_name, m.a2_name] : [m.b1_name, m.b2_name];
-    const elos = letter === 'A' ? [m.a1_elo, m.a2_elo] : [m.b1_elo, m.b2_elo];
-    const validElos = elos.filter((value) => value != null).map(Number);
-    const avg = validElos.length ? Math.round(validElos.reduce((sum, value) => sum + value, 0) / validElos.length) : '–';
+    const fighters = letter === 'A'
+      ? [
+          { name: m.a1_name, avatar_url: m.a1_avatar_url, elo: m.a1_elo },
+          { name: m.a2_name, avatar_url: m.a2_avatar_url, elo: m.a2_elo },
+        ]
+      : [
+          { name: m.b1_name, avatar_url: m.b1_avatar_url, elo: m.b1_elo },
+          { name: m.b2_name, avatar_url: m.b2_avatar_url, elo: m.b2_elo },
+        ];
     return `<div class="arena-side side-${letter.toLowerCase()}">
-      <span class="arena-corner">GÓC ${letter}</span>
-      <strong>${names.filter(Boolean).map(esc).join('<br>')}</strong>
-      <span class="arena-elo">ELO ${avg}</span>
+      <div class="arena-fighters">${fighters.filter((fighter) => fighter.name).map((fighter) => `
+        <div class="arena-fighter">${avatar(fighter)}<div class="arena-fighter-info">
+          <strong>${esc(fighter.name)}</strong><span>ELO ${rnd(fighter.elo)}</span>
+        </div></div>`).join('')}</div>
     </div>`;
   };
   const statusLabel = m.status === 'completed' ? 'ĐÃ PHÂN THẮNG BẠI' : m.status === 'cancelled' ? 'KÈO ĐÃ HỦY' : arenaCountdown(m.scheduled_at);
-  return `<article class="arena-card ${featured ? 'featured' : ''} status-${m.status}" data-id="${m.id}">
-    <div class="arena-card-top">
-      <span class="arena-type">${m.match_type === 'singles' ? 'SOLO 1 VS 1' : 'SONG ĐẤU 2 VS 2'} · ${Number(m.rated) === 0 ? 'GIAO HỮU' : 'TÍNH ELO'}</span>
-      <span class="arena-countdown">${statusLabel}</span>
-    </div>
+  return `<article class="arena-card status-${m.status}" data-id="${m.id}">
+    <div class="arena-countdown-line"><span>⏱ ${statusLabel}</span></div>
     <div class="arena-fight">
       ${side('A')}
       <div class="arena-vs"><b>VS</b><span>⚡</span></div>
@@ -778,7 +781,7 @@ async function viewArena() {
       ${canEdit() ? '<a class="btn arena-cta" href="#/arena/new">＋ LÊN KÈO MỚI</a>' : ''}
     </section>
     <div class="arena-section-title"><span>SẮP KHAI CHIẾN</span><b>${active.length}</b></div>
-    ${active.length ? active.map((m, i) => arenaCard(m, i === 0)).join('') : '<div class="arena-empty">Chưa có kèo nào trên bảng đấu.</div>'}
+    ${active.length ? active.map((m) => arenaCard(m)).join('') : '<div class="arena-empty">Chưa có kèo nào trên bảng đấu.</div>'}
     ${closed.length ? `<div class="arena-section-title subdued"><span>HẠ MÀN</span><b>${closed.length}</b></div>${closed.map((m) => arenaCard(m)).join('')}` : ''}
   </div>`;
 

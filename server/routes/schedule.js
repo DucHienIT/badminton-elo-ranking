@@ -46,10 +46,10 @@ async function validateSchedule(body) {
 
 const LIST_SQL = `
   SELECT s.*,
-    pa1.name a1_name, pa1.elo a1_elo,
-    pa2.name a2_name, pa2.elo a2_elo,
-    pb1.name b1_name, pb1.elo b1_elo,
-    pb2.name b2_name, pb2.elo b2_elo
+    pa1.name a1_name, pa1.elo a1_elo, pa1.avatar_url a1_avatar_url,
+    pa2.name a2_name, pa2.elo a2_elo, pa2.avatar_url a2_avatar_url,
+    pb1.name b1_name, pb1.elo b1_elo, pb1.avatar_url b1_avatar_url,
+    pb2.name b2_name, pb2.elo b2_elo, pb2.avatar_url b2_avatar_url
   FROM scheduled_matches s
   JOIN players pa1 ON pa1.id = s.a1
   LEFT JOIN players pa2 ON pa2.id = s.a2
