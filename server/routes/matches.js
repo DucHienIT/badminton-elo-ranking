@@ -11,18 +11,21 @@ const SCORE_RE = /^\s*\d{1,3}\s*-\s*\d{1,3}(\s*,\s*\d{1,3}\s*-\s*\d{1,3})*\s*$/;
 
 /** Kiểm tra dữ liệu trận đấu; trả về object sạch hoặc {error}. */
 async function validateMatch(body) {
-  const ids = [body.a1, body.a2, body.b1, body.b2].map(Number);
+  const match_type = body.match_type === 'singles' ? 'singles' : 'doubles';
+  const rated = body.rated === false || Number(body.rated) === 0 ? 0 : 1;
+  const ids = (match_type === 'singles' ? [body.a1, body.b1] : [body.a1, body.a2, body.b1, body.b2]).map(Number);
   if (ids.some((x) => !Number.isInteger(x) || x <= 0)) {
-    return { error: 'Phải chọn đủ 4 VĐV' };
+    return { error: `Phải chọn đủ ${match_type === 'singles' ? 2 : 4} VĐV` };
   }
-  if (new Set(ids).size !== 4) {
-    return { error: '4 VĐV phải khác nhau' };
+  if (new Set(ids).size !== ids.length) {
+    return { error: `${ids.length} VĐV phải khác nhau` };
   }
+  const placeholders = ids.map(() => '?').join(', ');
   const found = await db.execute({
-    sql: 'SELECT COUNT(*) c FROM players WHERE id IN (?, ?, ?, ?)',
+    sql: `SELECT COUNT(*) c FROM players WHERE id IN (${placeholders})`,
     args: ids,
   });
-  if (found.rows[0].c !== 4) return { error: 'Có VĐV không tồn tại' };
+  if (found.rows[0].c !== ids.length) return { error: 'Có VĐV không tồn tại' };
 
   if (body.winner !== 'A' && body.winner !== 'B') {
     return { error: 'Đội thắng phải là A hoặc B' };
@@ -37,7 +40,9 @@ async function validateMatch(body) {
   if (!date) date = new Date().toISOString().slice(0, 16);
   if (Number.isNaN(Date.parse(date))) return { error: 'Ngày giờ không hợp lệ' };
 
-  return { a1: ids[0], a2: ids[1], b1: ids[2], b2: ids[3], winner: body.winner, score, date };
+  return match_type === 'singles'
+    ? { a1: ids[0], a2: null, b1: ids[1], b2: null, match_type, rated, winner: body.winner, score, date }
+    : { a1: ids[0], a2: ids[1], b1: ids[2], b2: ids[3], match_type, rated, winner: body.winner, score, date };
 }
 
 // GET /api/matches — toàn bộ trận, mới nhất trước, kèm tên VĐV + delta từng người
@@ -50,9 +55,9 @@ router.get('/', async (req, res) => {
         pb1.name AS b1_name, pb2.name AS b2_name
        FROM matches m
        JOIN players pa1 ON pa1.id = m.a1
-       JOIN players pa2 ON pa2.id = m.a2
+       LEFT JOIN players pa2 ON pa2.id = m.a2
        JOIN players pb1 ON pb1.id = m.b1
-       JOIN players pb2 ON pb2.id = m.b2
+       LEFT JOIN players pb2 ON pb2.id = m.b2
        ORDER BY m.date DESC, m.id DESC`
     ),
     db.execute('SELECT match_id, player_id, delta, elo_after FROM elo_history'),
@@ -83,9 +88,9 @@ router.post('/', (req, res, next) =>
     const v = await validateMatch(req.body);
     if (v.error) return res.status(400).json({ error: v.error });
     const info = await db.execute({
-      sql: `INSERT INTO matches (date, a1, a2, b1, b2, winner, score)
-            VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      args: [v.date, v.a1, v.a2, v.b1, v.b2, v.winner, v.score],
+      sql: `INSERT INTO matches (date, a1, a2, b1, b2, match_type, rated, winner, score)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      args: [v.date, v.a1, v.a2, v.b1, v.b2, v.match_type, v.rated, v.winner, v.score],
     });
     await replayAllElo(); // trận có thể backdate → luôn replay theo thứ tự thời gian
     const id = Number(info.lastInsertRowid);
@@ -106,8 +111,8 @@ router.put('/:id', (req, res, next) =>
     const v = await validateMatch(req.body);
     if (v.error) return res.status(400).json({ error: v.error });
     await db.execute({
-      sql: 'UPDATE matches SET date=?, a1=?, a2=?, b1=?, b2=?, winner=?, score=? WHERE id=?',
-      args: [v.date, v.a1, v.a2, v.b1, v.b2, v.winner, v.score, id],
+      sql: 'UPDATE matches SET date=?, a1=?, a2=?, b1=?, b2=?, match_type=?, rated=?, winner=?, score=? WHERE id=?',
+      args: [v.date, v.a1, v.a2, v.b1, v.b2, v.match_type, v.rated, v.winner, v.score, id],
     });
     await replayAllElo();
     res.json({ ok: true });
@@ -120,6 +125,10 @@ router.delete('/:id', (req, res, next) =>
     const id = Number(req.params.id);
     const found = await db.execute({ sql: 'SELECT id FROM matches WHERE id = ?', args: [id] });
     if (!found.rows[0]) return res.status(404).json({ error: 'Không tìm thấy trận đấu' });
+    await db.execute({
+      sql: 'UPDATE scheduled_matches SET completed_match_id = NULL WHERE completed_match_id = ?',
+      args: [id],
+    });
     await db.execute({ sql: 'DELETE FROM elo_history WHERE match_id = ?', args: [id] });
     await db.execute({ sql: 'DELETE FROM matches WHERE id = ?', args: [id] });
     await replayAllElo();

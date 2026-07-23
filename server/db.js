@@ -29,9 +29,11 @@ const SCHEMA = `
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     date        TEXT NOT NULL,
     a1          INTEGER NOT NULL REFERENCES players(id),
-    a2          INTEGER NOT NULL REFERENCES players(id),
+    a2          INTEGER REFERENCES players(id),
     b1          INTEGER NOT NULL REFERENCES players(id),
-    b2          INTEGER NOT NULL REFERENCES players(id),
+    b2          INTEGER REFERENCES players(id),
+    match_type  TEXT NOT NULL DEFAULT 'doubles' CHECK (match_type IN ('singles', 'doubles')),
+    rated       INTEGER NOT NULL DEFAULT 1 CHECK (rated IN (0, 1)),
     winner      TEXT NOT NULL CHECK (winner IN ('A','B')),
     score       TEXT,
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
@@ -48,6 +50,24 @@ const SCHEMA = `
   CREATE INDEX IF NOT EXISTS idx_history_player ON elo_history(player_id);
   CREATE INDEX IF NOT EXISTS idx_history_match  ON elo_history(match_id);
   CREATE INDEX IF NOT EXISTS idx_matches_date   ON matches(date);
+  CREATE TABLE IF NOT EXISTS scheduled_matches (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    scheduled_at       TEXT NOT NULL,
+    match_type         TEXT NOT NULL DEFAULT 'doubles' CHECK (match_type IN ('singles', 'doubles')),
+    a1                 INTEGER NOT NULL REFERENCES players(id),
+    a2                 INTEGER REFERENCES players(id),
+    b1                 INTEGER NOT NULL REFERENCES players(id),
+    b2                 INTEGER REFERENCES players(id),
+    rated              INTEGER NOT NULL DEFAULT 1 CHECK (rated IN (0, 1)),
+    venue              TEXT,
+    stakes             TEXT,
+    note               TEXT,
+    status             TEXT NOT NULL DEFAULT 'scheduled' CHECK (status IN ('scheduled', 'cancelled', 'completed')),
+    completed_match_id INTEGER REFERENCES matches(id) ON DELETE SET NULL,
+    created_at         TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_schedule_time ON scheduled_matches(scheduled_at);
+  CREATE INDEX IF NOT EXISTS idx_schedule_status ON scheduled_matches(status);
   CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -65,6 +85,8 @@ const DEFAULT_SETTINGS = {
 /** Tạo schema + seed settings mặc định. Gọi 1 lần khi server khởi động. */
 async function initDb() {
   await db.executeMultiple(SCHEMA);
+  const migrated = await migrateMatchesForSingles();
+  await ensureRatedColumns();
   await db.batch(
     Object.entries(DEFAULT_SETTINGS).map(([k, v]) => ({
       sql: 'INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)',
@@ -72,6 +94,71 @@ async function initDb() {
     })),
     'write'
   );
+  // Việc chuyển bảng xoá lịch sử ELO dẫn xuất; khôi phục ngay khi khởi động
+  // để BXH và trang lịch sử vẫn chính xác trước khi có lần ghi trận tiếp theo.
+  if (migrated) await require('./elo').replayAllElo();
+}
+
+// SQLite không tự cập nhật cấu trúc bảng đã tồn tại khi chạy CREATE TABLE IF NOT EXISTS.
+// Thêm cờ rated cho database cũ bằng ALTER TABLE — mọi trận cũ mặc định vẫn tính ELO.
+async function ensureRatedColumns() {
+  for (const table of ['matches', 'scheduled_matches']) {
+    const columns = await db.execute(`PRAGMA table_info(${table})`);
+    if (!columns.rows.some((column) => column.name === 'rated')) {
+      await db.execute(`ALTER TABLE ${table} ADD COLUMN rated INTEGER NOT NULL DEFAULT 1 CHECK (rated IN (0, 1))`);
+    }
+  }
+}
+
+// Bản đầu tiên bắt buộc a2/b2. Khi nâng cấp, dựng lại bảng để trận đơn có thể
+// để trống hai cột này; lịch sử ELO là dữ liệu dẫn xuất nên sẽ được tạo lại ở
+// lần ghi/replay tiếp theo.
+async function migrateMatchesForSingles() {
+  const columns = await db.execute('PRAGMA table_info(matches)');
+  const a2 = columns.rows.find((c) => c.name === 'a2');
+  if (!a2 || !a2.notnull) return false;
+
+  await db.execute('PRAGMA foreign_keys = OFF');
+  try {
+    await db.executeMultiple(`
+      BEGIN;
+      DROP TABLE IF EXISTS matches_new;
+      CREATE TABLE matches_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        date TEXT NOT NULL,
+        a1 INTEGER NOT NULL REFERENCES players(id),
+        a2 INTEGER REFERENCES players(id),
+        b1 INTEGER NOT NULL REFERENCES players(id),
+        b2 INTEGER REFERENCES players(id),
+        match_type TEXT NOT NULL DEFAULT 'doubles' CHECK (match_type IN ('singles', 'doubles')),
+        rated INTEGER NOT NULL DEFAULT 1 CHECK (rated IN (0, 1)),
+        winner TEXT NOT NULL CHECK (winner IN ('A','B')),
+        score TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      INSERT INTO matches_new (id, date, a1, a2, b1, b2, match_type, rated, winner, score, created_at)
+        SELECT id, date, a1, a2, b1, b2, 'doubles', 1, winner, score, created_at FROM matches;
+      DROP TABLE elo_history;
+      DROP TABLE matches;
+      ALTER TABLE matches_new RENAME TO matches;
+      CREATE TABLE elo_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        match_id INTEGER NOT NULL REFERENCES matches(id) ON DELETE CASCADE,
+        player_id INTEGER NOT NULL REFERENCES players(id),
+        elo_before REAL NOT NULL,
+        elo_after REAL NOT NULL,
+        delta REAL NOT NULL,
+        date TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_history_player ON elo_history(player_id);
+      CREATE INDEX IF NOT EXISTS idx_history_match ON elo_history(match_id);
+      CREATE INDEX IF NOT EXISTS idx_matches_date ON matches(date);
+      COMMIT;
+    `);
+  } finally {
+    await db.execute('PRAGMA foreign_keys = ON');
+  }
+  return true;
 }
 
 /** Đọc toàn bộ settings, ép kiểu số. */

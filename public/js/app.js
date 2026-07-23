@@ -116,6 +116,9 @@ const routes = [
   { re: /^#?\/?$/, view: viewLeaderboard, nav: 'home' },
   { re: /^#\/new$/, view: () => viewMatchForm(null), nav: 'new' },
   { re: /^#\/edit\/(\d+)$/, view: (m) => viewMatchForm(Number(m[1])), nav: 'matches' },
+  { re: /^#\/arena$/, view: viewArena, nav: 'arena' },
+  { re: /^#\/arena\/new$/, view: () => viewScheduleForm(null), nav: 'arena' },
+  { re: /^#\/arena\/edit\/(\d+)$/, view: (m) => viewScheduleForm(Number(m[1])), nav: 'arena' },
   { re: /^#\/players$/, view: viewPlayers, nav: 'players' },
   { re: /^#\/player\/(\d+)$/, view: (m) => viewPlayerDetail(Number(m[1])), nav: 'players' },
   { re: /^#\/matches$/, view: viewMatches, nav: 'matches' },
@@ -235,9 +238,9 @@ function buildScore(sets) {
 async function viewMatchForm(editId) {
   if (!canEdit()) { location.hash = '#/login'; return; }
   const players = await api('GET', '/players');
-  if (players.length < 4) {
+  if (players.length < 2) {
     $app.innerHTML = `<h1>➕ Ghi nhận trận đấu</h1>
-      <div class="empty">Cần ít nhất 4 VĐV để ghi trận đấu.<br>Hiện có ${players.length}.<br><br>
+      <div class="empty">Cần ít nhất 2 VĐV để ghi trận đấu.<br>Hiện có ${players.length}.<br><br>
       <a class="btn" href="#/players">＋ Thêm VĐV</a></div>`;
     return;
   }
@@ -245,9 +248,18 @@ async function viewMatchForm(editId) {
   let match = null;
   if (editId) match = await api('GET', '/matches/' + editId);
 
+  let scheduleDraft = null;
+  if (!editId) {
+    try { scheduleDraft = JSON.parse(sessionStorage.getItem('schedule_match_draft') || 'null'); } catch {}
+    sessionStorage.removeItem('schedule_match_draft');
+  }
+  let scheduleId = Number(scheduleDraft?.id) || null;
+
   const state = {
-    a1: match?.a1 || '', a2: match?.a2 || '',
-    b1: match?.b1 || '', b2: match?.b2 || '',
+    match_type: match?.match_type || scheduleDraft?.match_type || 'doubles',
+    rated: match ? Number(match.rated) !== 0 : scheduleDraft ? Number(scheduleDraft.rated) !== 0 : true,
+    a1: match?.a1 || scheduleDraft?.a1 || '', a2: match?.a2 || scheduleDraft?.a2 || '',
+    b1: match?.b1 || scheduleDraft?.b1 || '', b2: match?.b2 || scheduleDraft?.b2 || '',
     winner: match?.winner || '',
     // Scoreboard: tối thiểu 1 ván, tối đa 3 (cầu lông đánh best-of-3)
     sets: (() => {
@@ -258,10 +270,13 @@ async function viewMatchForm(editId) {
 
   // Khôi phục NHÁP của form (đã lưu khi mở Bộ đếm) — giữ nguyên 4 VĐV,
   // đội thắng, ngày giờ, các ván khi đi sang bộ đếm rồi quay lại
-  let draftDate = null;
+  let draftDate = scheduleDraft?.scheduled_at?.slice(0, 16) || null;
   try {
     const draft = JSON.parse(sessionStorage.getItem('match_draft') || 'null');
     if (draft && (draft.editId || null) === (editId || null)) {
+      state.match_type = draft.match_type || state.match_type;
+      state.rated = draft.rated !== false;
+      scheduleId = Number(draft.schedule_id) || scheduleId;
       state.a1 = draft.a1; state.a2 = draft.a2;
       state.b1 = draft.b1; state.b2 = draft.b2;
       state.winner = draft.winner || '';
@@ -282,9 +297,10 @@ async function viewMatchForm(editId) {
   } catch {}
   localStorage.removeItem('counter_sets'); // dùng 1 lần
 
-  const slotLabels = { a1: 'VĐV 1', a2: 'VĐV 2', b1: 'VĐV 1', b2: 'VĐV 2' };
+  const slotLabels = { a1: 'VĐV', a2: 'VĐV 2', b1: 'VĐV', b2: 'VĐV 2' };
   const playerOptions = (slot) => {
-    const takenElsewhere = ['a1', 'a2', 'b1', 'b2']
+    const activeSlots = state.match_type === 'singles' ? ['a1', 'b1'] : ['a1', 'a2', 'b1', 'b2'];
+    const takenElsewhere = activeSlots
       .filter((s) => s !== slot)
       .map((s) => Number(state[s]))
       .filter(Boolean);
@@ -306,16 +322,27 @@ async function viewMatchForm(editId) {
   $app.innerHTML = `
     <h1>${editId ? '✏️ Sửa trận đấu' : '➕ Ghi nhận trận đấu'}</h1>
     <form id="matchForm" class="card">
+      <label class="field">Loại trận đấu
+        <select id="matchType">
+          <option value="doubles" ${state.match_type === 'doubles' ? 'selected' : ''}>Đánh đôi (2 vs 2)</option>
+          <option value="singles" ${state.match_type === 'singles' ? 'selected' : ''}>Đánh đơn (1 vs 1)</option>
+        </select>
+      </label>
+      <label class="elo-check">
+        <input type="checkbox" id="matchRated" ${state.rated ? 'checked' : ''}>
+        <span class="elo-check-box">✓</span>
+        <span><b>Tính ELO cho trận này</b><small>Bỏ tích để chỉ lưu kết quả, ELO không thay đổi</small></span>
+      </label>
       <div class="team-box" id="boxA">
-        <h3>Đội A <span class="win-badge" hidden>THẮNG</span></h3>
+        <h3 id="titleA">Đội A <span class="win-badge" hidden>THẮNG</span></h3>
         <label class="field"><select id="sel-a1">${playerOptions('a1')}</select></label>
-        <label class="field"><select id="sel-a2">${playerOptions('a2')}</select></label>
+        <label class="field doubles-slot"><select id="sel-a2">${playerOptions('a2')}</select></label>
       </div>
       <div class="vs-divider">VS</div>
       <div class="team-box" id="boxB">
-        <h3>Đội B <span class="win-badge" hidden>THẮNG</span></h3>
+        <h3 id="titleB">Đội B <span class="win-badge" hidden>THẮNG</span></h3>
         <label class="field"><select id="sel-b1">${playerOptions('b1')}</select></label>
-        <label class="field"><select id="sel-b2">${playerOptions('b2')}</select></label>
+        <label class="field doubles-slot"><select id="sel-b2">${playerOptions('b2')}</select></label>
       </div>
 
       <p style="margin:0 0 6px;font-weight:600;font-size:.9rem">Đội thắng <span class="req">*</span></p>
@@ -349,6 +376,21 @@ async function viewMatchForm(editId) {
       }
     });
   }
+
+  const updateMatchType = () => {
+    const singles = state.match_type === 'singles';
+    document.querySelectorAll('.doubles-slot').forEach((el) => { el.hidden = singles; });
+    document.getElementById('titleA').firstChild.textContent = singles ? 'Người chơi A ' : 'Đội A ';
+    document.getElementById('titleB').firstChild.textContent = singles ? 'Người chơi B ' : 'Đội B ';
+    for (const slot of ['a1', 'a2', 'b1', 'b2']) {
+      document.getElementById('sel-' + slot).innerHTML = playerOptions(slot);
+    }
+  };
+  document.getElementById('matchType').addEventListener('change', (e) => {
+    state.match_type = e.target.value;
+    updateMatchType();
+  });
+  updateMatchType();
 
   const winA = document.getElementById('winA');
   const winB = document.getElementById('winB');
@@ -450,6 +492,9 @@ async function viewMatchForm(editId) {
   document.getElementById('openCounter').addEventListener('click', () => {
     sessionStorage.setItem('match_draft', JSON.stringify({
       editId: editId || null,
+      schedule_id: scheduleId,
+      match_type: state.match_type,
+      rated: document.getElementById('matchRated').checked,
       a1: state.a1, a2: state.a2, b1: state.b1, b2: state.b2,
       winner: state.winner,
       sets: state.sets,
@@ -464,14 +509,16 @@ async function viewMatchForm(editId) {
     if (incomplete >= 0) return toast(`Ván ${incomplete + 1} nhập thiếu điểm một đội`, true);
 
     const payload = {
+      match_type: state.match_type,
+      rated: document.getElementById('matchRated').checked,
       a1: Number(state.a1), a2: Number(state.a2),
       b1: Number(state.b1), b2: Number(state.b2),
       winner: state.winner,
       score: buildScore(state.sets),
       date: document.getElementById('date').value,
     };
-    if (!payload.a1 || !payload.a2 || !payload.b1 || !payload.b2)
-      return toast('Hãy chọn đủ 4 VĐV', true);
+    if (!payload.a1 || !payload.b1 || (payload.match_type === 'doubles' && (!payload.a2 || !payload.b2)))
+      return toast(`Hãy chọn đủ ${payload.match_type === 'singles' ? 2 : 4} VĐV`, true);
     if (!payload.winner) return toast('Hãy chọn đội thắng', true);
 
     // Cảnh báo nếu đội thắng chọn ngược với tỷ số các ván
@@ -486,9 +533,12 @@ async function viewMatchForm(editId) {
         location.hash = '#/matches';
       } else {
         const r = await api('POST', '/matches', payload);
+        if (scheduleId) await api('PUT', `/schedule/${scheduleId}/complete`, { match_id: r.id });
         const winDelta = r.deltas.find((d) => d.delta >= 0);
-        toast(`Đã ghi nhận! Đội thắng ${winDelta ? '+' + rnd(winDelta.delta) : ''} điểm ELO`);
-        location.hash = '#/';
+        toast(payload.rated
+          ? `Đã ghi nhận! Đội thắng ${winDelta ? '+' + rnd(winDelta.delta) : ''} điểm ELO`
+          : 'Đã ghi nhận trận giao hữu — ELO không thay đổi');
+        location.hash = scheduleId ? '#/arena' : '#/';
       }
     } catch (err) {
       toast(err.message, true);
@@ -665,17 +715,210 @@ async function viewPlayers() {
   });
 }
 
-/* ================= 4. Lịch sử trận đấu ================= */
+/* ================= 4. Đấu trường — lịch thi đấu ================= */
+function arenaCountdown(iso) {
+  const diff = new Date(iso).getTime() - Date.now();
+  if (!Number.isFinite(diff)) return '';
+  if (diff <= 0) return 'ĐÃ TỚI GIỜ';
+  const hours = Math.floor(diff / 3600000);
+  const days = Math.floor(hours / 24);
+  if (days > 0) return `CÒN ${days} NGÀY ${hours % 24} GIỜ`;
+  const minutes = Math.max(1, Math.floor(diff / 60000));
+  return hours > 0 ? `CÒN ${hours} GIỜ ${minutes % 60} PHÚT` : `CÒN ${minutes} PHÚT`;
+}
+
+function arenaCard(m, featured = false) {
+  const side = (letter) => {
+    const names = letter === 'A' ? [m.a1_name, m.a2_name] : [m.b1_name, m.b2_name];
+    const elos = letter === 'A' ? [m.a1_elo, m.a2_elo] : [m.b1_elo, m.b2_elo];
+    const validElos = elos.filter((value) => value != null).map(Number);
+    const avg = validElos.length ? Math.round(validElos.reduce((sum, value) => sum + value, 0) / validElos.length) : '–';
+    return `<div class="arena-side side-${letter.toLowerCase()}">
+      <span class="arena-corner">GÓC ${letter}</span>
+      <strong>${names.filter(Boolean).map(esc).join('<br>')}</strong>
+      <span class="arena-elo">ELO ${avg}</span>
+    </div>`;
+  };
+  const statusLabel = m.status === 'completed' ? 'ĐÃ PHÂN THẮNG BẠI' : m.status === 'cancelled' ? 'KÈO ĐÃ HỦY' : arenaCountdown(m.scheduled_at);
+  return `<article class="arena-card ${featured ? 'featured' : ''} status-${m.status}" data-id="${m.id}">
+    <div class="arena-card-top">
+      <span class="arena-type">${m.match_type === 'singles' ? 'SOLO 1 VS 1' : 'SONG ĐẤU 2 VS 2'} · ${Number(m.rated) === 0 ? 'GIAO HỮU' : 'TÍNH ELO'}</span>
+      <span class="arena-countdown">${statusLabel}</span>
+    </div>
+    <div class="arena-fight">
+      ${side('A')}
+      <div class="arena-vs"><b>VS</b><span>⚡</span></div>
+      ${side('B')}
+    </div>
+    <div class="arena-intel">
+      <span>🗓 ${fmtDate(m.scheduled_at)}</span>
+      ${m.venue ? `<span>📍 ${esc(m.venue)}</span>` : ''}
+      ${m.stakes ? `<span class="arena-stakes">💰 KÈO: ${esc(m.stakes)}</span>` : ''}
+      ${m.note ? `<span>📜 ${esc(m.note)}</span>` : ''}
+    </div>
+    ${canEdit() && m.status !== 'completed' ? `<div class="arena-actions">
+      ${m.status === 'scheduled' ? '<button class="btn arena-primary sm" data-arena="start">⚔️ Vào trận</button>' : ''}
+      <a class="btn arena-ghost sm" href="#/arena/edit/${m.id}">✏️ Chỉnh kèo</a>
+      ${m.status === 'scheduled' ? '<button class="btn arena-ghost sm" data-arena="cancel">Hủy kèo</button>' : ''}
+      <button class="btn arena-danger sm" data-arena="delete">Xóa</button>
+    </div>` : ''}
+  </article>`;
+}
+
+async function viewArena() {
+  const matches = await api('GET', '/schedule');
+  const active = matches.filter((m) => m.status === 'scheduled');
+  const closed = matches.filter((m) => m.status !== 'scheduled');
+  const byId = new Map(matches.map((m) => [Number(m.id), m]));
+  $app.innerHTML = `<div class="arena-page">
+    <section class="arena-hero">
+      <span class="arena-kicker">CLB BADMINTON · FIGHT NIGHT</span>
+      <h1>ĐẤU TRƯỜNG</h1>
+      <p>Lên lịch. Chốt kèo. Bước vào sân và để ELO phán xét.</p>
+      ${canEdit() ? '<a class="btn arena-cta" href="#/arena/new">＋ LÊN KÈO MỚI</a>' : ''}
+    </section>
+    <div class="arena-section-title"><span>SẮP KHAI CHIẾN</span><b>${active.length}</b></div>
+    ${active.length ? active.map((m, i) => arenaCard(m, i === 0)).join('') : '<div class="arena-empty">Chưa có kèo nào trên bảng đấu.</div>'}
+    ${closed.length ? `<div class="arena-section-title subdued"><span>HẠ MÀN</span><b>${closed.length}</b></div>${closed.map((m) => arenaCard(m)).join('')}` : ''}
+  </div>`;
+
+  $app.onclick = async (event) => {
+    const button = event.target.closest('[data-arena]');
+    if (!button) return;
+    const card = button.closest('.arena-card');
+    const item = byId.get(Number(card?.dataset.id));
+    if (!item) return;
+    try {
+      if (button.dataset.arena === 'start') {
+        sessionStorage.setItem('schedule_match_draft', JSON.stringify(item));
+        location.hash = '#/new';
+        return;
+      }
+      if (button.dataset.arena === 'cancel') {
+        if (!confirm('Hủy kèo đấu này?')) return;
+        await api('PUT', '/schedule/' + item.id, { ...item, status: 'cancelled' });
+        toast('Đã hủy kèo đấu');
+      }
+      if (button.dataset.arena === 'delete') {
+        if (!confirm('Xóa vĩnh viễn lịch đấu này?')) return;
+        await api('DELETE', '/schedule/' + item.id);
+        toast('Đã xóa lịch đấu');
+      }
+      viewArena();
+    } catch (err) { toast(err.message, true); }
+  };
+}
+
+async function viewScheduleForm(editId) {
+  if (!canEdit()) { location.hash = '#/login'; return; }
+  const [players, current] = await Promise.all([
+    api('GET', '/players'),
+    editId ? api('GET', '/schedule/' + editId) : Promise.resolve(null),
+  ]);
+  if (players.length < 2) {
+    $app.innerHTML = '<div class="empty">Cần ít nhất 2 VĐV để lên lịch đấu.</div>';
+    return;
+  }
+  const future = new Date(Date.now() + 24 * 3600000);
+  future.setMinutes(future.getMinutes() - future.getTimezoneOffset());
+  const state = {
+    match_type: current?.match_type || 'singles',
+    a1: current?.a1 || '', a2: current?.a2 || '',
+    b1: current?.b1 || '', b2: current?.b2 || '',
+  };
+  const slots = () => state.match_type === 'singles' ? ['a1', 'b1'] : ['a1', 'a2', 'b1', 'b2'];
+  const options = (slot) => {
+    const taken = slots().filter((key) => key !== slot).map((key) => Number(state[key])).filter(Boolean);
+    return '<option value="">— Chọn chiến binh —</option>' + players
+      .filter((p) => !taken.includes(p.id))
+      .map((p) => `<option value="${p.id}" ${Number(state[slot]) === p.id ? 'selected' : ''}>${esc(p.name)} · ELO ${rnd(p.elo)}</option>`)
+      .join('');
+  };
+
+  $app.innerHTML = `<div class="arena-page arena-form-page">
+    <a class="arena-back" href="#/arena">← Trở lại Đấu trường</a>
+    <section class="arena-hero compact">
+      <span class="arena-kicker">MATCH MAKING</span>
+      <h1>${editId ? 'CHỈNH KÈO ĐẤU' : 'LÊN KÈO MỚI'}</h1>
+    </section>
+    <form id="scheduleForm" class="arena-form">
+      <div class="arena-format" id="scheduleType">
+        <button type="button" data-type="singles">SOLO · 1 VS 1</button>
+        <button type="button" data-type="doubles">SONG ĐẤU · 2 VS 2</button>
+      </div>
+      <div class="arena-form-fight">
+        <div class="arena-pick"><b>GÓC A</b><label>Chiến binh 1<select id="sch-a1"></select></label><label class="sch-double">Chiến binh 2<select id="sch-a2"></select></label></div>
+        <div class="arena-form-vs">VS</div>
+        <div class="arena-pick"><b>GÓC B</b><label>Chiến binh 1<select id="sch-b1"></select></label><label class="sch-double">Chiến binh 2<select id="sch-b2"></select></label></div>
+      </div>
+      <div class="arena-fields">
+        <label class="elo-check arena-elo-check">
+          <input type="checkbox" id="sch-rated" ${!current || Number(current.rated) !== 0 ? 'checked' : ''}>
+          <span class="elo-check-box">✓</span>
+          <span><b>Tính ELO khi chốt kết quả</b><small>Bỏ tích nếu đây là trận giao hữu hoặc kèo không tính hạng</small></span>
+        </label>
+        <label>🗓 Giờ khai chiến<input id="sch-date" type="datetime-local" value="${esc(current?.scheduled_at?.slice(0, 16) || future.toISOString().slice(0, 16))}" required></label>
+        <label>📍 Sàn đấu<input id="sch-venue" type="text" maxlength="120" value="${esc(current?.venue || '')}" placeholder="Sân số 3, CLB..."></label>
+        <label class="arena-wager">💰 Kèo cược<input id="sch-stakes" type="text" maxlength="200" value="${esc(current?.stakes || '')}" placeholder="500K, chầu bia, 20 quả cầu..."></label>
+        <label>📜 Tuyên chiến / ghi chú<textarea id="sch-note" maxlength="500" rows="3" placeholder="Luật kèo, lời thách đấu...">${esc(current?.note || '')}</textarea></label>
+        ${editId ? `<label>Trạng thái<select id="sch-status"><option value="scheduled" ${current.status === 'scheduled' ? 'selected' : ''}>Sẵn sàng chiến</option><option value="cancelled" ${current.status === 'cancelled' ? 'selected' : ''}>Đã hủy kèo</option></select></label>` : ''}
+      </div>
+      <button class="btn arena-cta block" type="submit">${editId ? '💾 CẬP NHẬT KÈO' : '🔥 CHỐT KÈO · LÊN LỊCH'}</button>
+    </form>
+  </div>`;
+
+  const renderPicks = () => {
+    document.querySelectorAll('#scheduleType button').forEach((button) => button.classList.toggle('active', button.dataset.type === state.match_type));
+    document.querySelectorAll('.sch-double').forEach((label) => { label.hidden = state.match_type === 'singles'; });
+    for (const slot of ['a1', 'a2', 'b1', 'b2']) document.getElementById('sch-' + slot).innerHTML = options(slot);
+  };
+  document.getElementById('scheduleType').addEventListener('click', (event) => {
+    const button = event.target.closest('[data-type]');
+    if (!button) return;
+    state.match_type = button.dataset.type;
+    renderPicks();
+  });
+  for (const slot of ['a1', 'a2', 'b1', 'b2']) {
+    document.getElementById('sch-' + slot).addEventListener('change', (event) => {
+      state[slot] = event.target.value;
+      renderPicks();
+    });
+  }
+  renderPicks();
+
+  document.getElementById('scheduleForm').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const body = {
+      ...state,
+      rated: document.getElementById('sch-rated').checked,
+      scheduled_at: document.getElementById('sch-date').value,
+      venue: document.getElementById('sch-venue').value,
+      stakes: document.getElementById('sch-stakes').value,
+      note: document.getElementById('sch-note').value,
+      status: document.getElementById('sch-status')?.value || 'scheduled',
+    };
+    if (!body.a1 || !body.b1 || (body.match_type === 'doubles' && (!body.a2 || !body.b2))) {
+      return toast(`Hãy chọn đủ ${body.match_type === 'singles' ? 2 : 4} VĐV`, true);
+    }
+    try {
+      await api(editId ? 'PUT' : 'POST', editId ? '/schedule/' + editId : '/schedule', body);
+      toast(editId ? 'Đã cập nhật kèo đấu' : 'Đã chốt kèo và lên lịch');
+      location.hash = '#/arena';
+    } catch (err) { toast(err.message, true); }
+  });
+}
+
+/* ================= 5. Lịch sử trận đấu ================= */
 function matchCard(m, opts = {}) {
   const names = (t) =>
     t === 'A'
-      ? `${esc(m.a1_name)}<br>${esc(m.a2_name)}`
-      : `${esc(m.b1_name)}<br>${esc(m.b2_name)}`;
+      ? [m.a1_name, m.a2_name].filter(Boolean).map(esc).join('<br>')
+      : [m.b1_name, m.b2_name].filter(Boolean).map(esc).join('<br>');
   const teamHtml = (t) => {
     const won = m.winner === t;
     // delta của đội = delta của thành viên đầu tiên đội đó (2 người thường bằng nhau,
     // chỉ khác khi K khác nhau — hiển thị từng người ở trang chi tiết VĐV)
-    const memberIds = t === 'A' ? [m.a1, m.a2] : [m.b1, m.b2];
+    const memberIds = (t === 'A' ? [m.a1, m.a2] : [m.b1, m.b2]).filter(Boolean);
     const deltas = m.deltas
       ? memberIds.map((id) => m.deltas[id]?.delta).filter((d) => d != null)
       : [];
@@ -693,7 +936,7 @@ function matchCard(m, opts = {}) {
     <div class="card match-card" data-id="${m.id}">
       <div class="match-head">
         <span>📅 ${fmtDate(m.date)}</span>
-        <span>#${m.id}</span>
+        <span>${m.match_type === 'singles' ? 'Đơn' : 'Đôi'} · ${Number(m.rated) === 0 ? 'Giao hữu' : 'Tính ELO'} · #${m.id}</span>
       </div>
       <div class="match-teams">
         ${teamHtml('A')}
@@ -846,7 +1089,10 @@ async function viewPlayerDetail(id) {
               const partner = onA
                 ? (m.a1 === id ? m.a2_name : m.a1_name)
                 : (m.b1 === id ? m.b2_name : m.b1_name);
-              const opps = onA ? [m.b1_name, m.b2_name] : [m.a1_name, m.a2_name];
+              const opps = (onA ? [m.b1_name, m.b2_name] : [m.a1_name, m.a2_name]).filter(Boolean);
+              const matchup = m.match_type === 'singles'
+                ? `Đấu đơn với <b>${esc(opps[0])}</b>`
+                : `Cùng <b>${esc(partner)}</b> đấu với <b>${esc(opps[0])}</b> &amp; <b>${esc(opps[1])}</b>`;
               return `
               <div class="card match-card">
                 <div class="match-head">
@@ -856,7 +1102,7 @@ async function viewPlayerDetail(id) {
                   </span>
                 </div>
                 <div style="font-size:.9rem">
-                  Cùng <b>${esc(partner)}</b> đấu với <b>${esc(opps[0])}</b> &amp; <b>${esc(opps[1])}</b>
+                  ${matchup}
                   ${m.score ? `<div class="muted">Tỷ số: ${esc(m.score)}</div>` : ''}
                   <div class="muted">ELO sau trận: ${m.elo_after != null ? rnd(m.elo_after) : '–'}</div>
                 </div>

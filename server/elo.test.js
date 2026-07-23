@@ -103,6 +103,57 @@ const { db, initDb } = require('./db');
     console.log('✔ Test 5: replay đúng thứ tự thời gian, xử lý xoá trận');
   }
 
+  // ---------- Test 6: ELO trận đơn ----------
+  {
+    const { deltas, after, expectedA } = computeMatchElo(
+      [1200, 1000], 'B', [32, 32], 100
+    );
+    assert.ok(Math.abs(expectedA - 0.7597) < 0.001, `E_A ≈ 0.760, got ${expectedA}`);
+    assert.ok(Math.abs(deltas[0] + 24.31) < 0.05, `A thua ≈ -24.3, got ${deltas[0]}`);
+    assert.ok(Math.abs(deltas[1] - 24.31) < 0.05, `B thắng ≈ +24.3, got ${deltas[1]}`);
+    assert.strictEqual(after.length, 2, 'trận đơn chỉ ghi 2 thay đổi ELO');
+    console.log('✔ Test 6: ELO trận đơn 1-vs-1');
+  }
+
+  // ---------- Test 7: replay lưu đúng lịch sử cho trận đơn ----------
+  {
+    const ids = (await db.execute('SELECT id FROM players ORDER BY id LIMIT 2')).rows.map((p) => p.id);
+    const single = await db.execute({
+      sql: `INSERT INTO matches (date, a1, b1, match_type, winner)
+            VALUES (?, ?, ?, 'singles', 'A')`,
+      args: ['2026-07-03T10:00', ids[0], ids[1]],
+    });
+    const matchId = Number(single.lastInsertRowid);
+    await replayAllElo();
+    const rows = await db.execute({
+      sql: 'SELECT player_id FROM elo_history WHERE match_id = ? ORDER BY player_id',
+      args: [matchId],
+    });
+    assert.deepStrictEqual(rows.rows.map((r) => r.player_id), ids, 'lịch sử trận đơn có đúng 2 VĐV');
+    console.log('✔ Test 7: replay trận đơn ghi đúng 2 dòng lịch sử');
+  }
+
+  // ---------- Test 8: trận không tính ELO bị replay bỏ qua ----------
+  {
+    const ids = (await db.execute('SELECT id FROM players ORDER BY id LIMIT 2')).rows.map((p) => p.id);
+    await replayAllElo();
+    const before = (await db.execute({ sql: 'SELECT id, elo FROM players WHERE id IN (?, ?) ORDER BY id', args: ids })).rows;
+    const friendly = await db.execute({
+      sql: `INSERT INTO matches (date, a1, b1, match_type, rated, winner)
+            VALUES (?, ?, ?, 'singles', 0, 'B')`,
+      args: ['2026-07-04T10:00', ids[0], ids[1]],
+    });
+    await replayAllElo();
+    const after = (await db.execute({ sql: 'SELECT id, elo FROM players WHERE id IN (?, ?) ORDER BY id', args: ids })).rows;
+    const historyCount = (await db.execute({
+      sql: 'SELECT COUNT(*) c FROM elo_history WHERE match_id = ?',
+      args: [Number(friendly.lastInsertRowid)],
+    })).rows[0].c;
+    assert.deepStrictEqual(after, before, 'trận giao hữu không được thay đổi ELO');
+    assert.strictEqual(historyCount, 0, 'trận giao hữu không tạo lịch sử ELO');
+    console.log('✔ Test 8: trận bỏ tích không thay đổi ELO');
+  }
+
   console.log('\nTất cả test ELO đã pass ✅');
   db.close();
   try { fs.rmSync(TEST_DB); } catch {}
