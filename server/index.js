@@ -67,6 +67,7 @@ app.use('/api', (req, res, next) => {
 
 app.use('/api/players', require('./routes/players'));
 app.use('/api/matches', require('./routes/matches'));
+app.use('/api/schedule', require('./routes/schedule'));
 app.use('/api/settings', require('./routes/settings'));
 
 // 404 cho API không tồn tại

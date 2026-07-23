@@ -125,9 +125,9 @@ router.get('/:id', async (req, res) => {
               h.delta, h.elo_after
             FROM matches m
             JOIN players pa1 ON pa1.id = m.a1
-            JOIN players pa2 ON pa2.id = m.a2
+            LEFT JOIN players pa2 ON pa2.id = m.a2
             JOIN players pb1 ON pb1.id = m.b1
-            JOIN players pb2 ON pb2.id = m.b2
+            LEFT JOIN players pb2 ON pb2.id = m.b2
             LEFT JOIN elo_history h ON h.match_id = m.id AND h.player_id = ?
             WHERE ? IN (m.a1, m.a2, m.b1, m.b2)
             ORDER BY m.date DESC, m.id DESC`,
@@ -144,14 +144,14 @@ router.get('/:id', async (req, res) => {
     const onA = m.a1 === id || m.a2 === id;
     const won = (m.winner === 'A') === onA;
     const partnerId = onA ? (m.a1 === id ? m.a2 : m.a1) : (m.b1 === id ? m.b2 : m.b1);
-    const oppIds = onA ? [m.b1, m.b2] : [m.a1, m.a2];
+    const oppIds = (onA ? [m.b1, m.b2] : [m.a1, m.a2]).filter((pid) => pid != null);
     const bump = (map, pid) => {
       const cur = map.get(pid) || { games: 0, wins: 0 };
       cur.games += 1;
       if (won) cur.wins += 1;
       map.set(pid, cur);
     };
-    bump(partners, partnerId);
+    if (partnerId != null) bump(partners, partnerId);
     oppIds.forEach((pid) => bump(opponents, pid));
   }
   const topOf = (map) =>

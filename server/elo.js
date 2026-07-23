@@ -27,9 +27,11 @@ const { db, getSettings } = require('./db');
  *          deltas/after theo đúng thứ tự [A1, A2, B1, B2]
  */
 function computeMatchElo(elos, winner, ks, minElo) {
-  const [a1, a2, b1, b2] = elos;
-  const eloA = (a1 + a2) / 2;
-  const eloB = (b1 + b2) / 2;
+  const teamSize = elos.length / 2;
+  const teamA = elos.slice(0, teamSize);
+  const teamB = elos.slice(teamSize);
+  const eloA = teamA.reduce((sum, value) => sum + value, 0) / teamSize;
+  const eloB = teamB.reduce((sum, value) => sum + value, 0) / teamSize;
 
   // Kỳ vọng thắng của đội A theo công thức ELO chuẩn
   const expectedA = 1 / (1 + Math.pow(10, (eloB - eloA) / 400));
@@ -41,12 +43,9 @@ function computeMatchElo(elos, winner, ks, minElo) {
 
   // Δ của từng người = K(của người đó) * (S đội - E đội).
   // Mỗi người trong cùng đội nhận cùng (S - E), chỉ K có thể khác.
-  const rawDeltas = [
-    ks[0] * (scoreA - expectedA), // A1
-    ks[1] * (scoreA - expectedA), // A2
-    ks[2] * (scoreB - expectedB), // B1
-    ks[3] * (scoreB - expectedB), // B2
-  ];
+  const rawDeltas = ks.map((k, i) =>
+    k * ((i < teamSize ? scoreA : scoreB) - (i < teamSize ? expectedA : expectedB))
+  );
 
   // Áp dụng ELO sàn: nếu trừ điểm làm ELO < minElo thì chặn tại minElo.
   const after = [];
@@ -100,7 +99,8 @@ async function replayAllElo() {
   const stmts = [{ sql: 'DELETE FROM elo_history', args: [] }];
 
   for (const m of matchesRes.rows) {
-    const ids = [m.a1, m.a2, m.b1, m.b2];
+    if (Number(m.rated) === 0) continue;
+    const ids = m.match_type === 'singles' ? [m.a1, m.b1] : [m.a1, m.a2, m.b1, m.b2];
     const before = ids.map((id) => elo.get(id));
     // K của từng người: VĐV còn "mới" (đấu < new_threshold trận) dùng k_new
     const ks = ids.map((id) => (played.get(id) < new_threshold ? k_new : k_base));
